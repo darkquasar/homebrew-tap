@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "payload": {
+    "identity": {
+      "app": "lumen",
+      "repository": "darkquasar/lumen",
+      "tag": "v1.4.2",
+      "version": "1.4.2",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checksums_sha256": "77e96e54b4ede1a6af2ee418dfc1c78108849b019ade8f39213b65ae31c8d74b",
+      "assets": {
+        "lumen-darwin-amd64": {
+          "size": 28,
+          "sha256": "245d550718bd754fa685d8c7bde40155db3cf1afbccd50c2b6da77d533869f9e"
+        },
+        "lumen-darwin-arm64": {
+          "size": 28,
+          "sha256": "f37b2da16d8b457dcb8bdb6e212d332761a37c8d829a207d0b588696b7d97056"
+        },
+        "lumen-linux-amd64": {
+          "size": 27,
+          "sha256": "4e9f04153d26877bc8b5c34b3265852e0bae522dd476ba9e0b039a88e657e904"
+        },
+        "lumen-linux-arm64": {
+          "size": 27,
+          "sha256": "cbb54863e38957d94afae83d6f6b9ef9036d63c2341963f9368133b164794a36"
+        },
+        "lumen-windows-amd64.exe": {
+          "size": 33,
+          "sha256": "e9317d3bf2405c355057b308ddbeab6e0c2e7602248eac66a424f344c298ef80"
+        },
+        "lumen-windows-arm64.exe": {
+          "size": 33,
+          "sha256": "19fbb5b4bd85a1663119b7519e4e6fe637475b19e9cc0c91413b48e545a4289d"
+        }
+      }
+    },
+    "authorization": {
+      "kind": "baseline",
+      "reference": "fixture:owner-baseline/40/1",
+      "owner_id": 28435534,
+      "identity_digest": "f926054767c68b1ffa3672819ce8fdbfac06c24cd5a818cffd6088afc331f833"
+    },
+    "initial_configuration_digest": "8149246d1d9731233409ba4986315c898bc0641ca98731db5313043f391d01f0"
+  },
+  "snapshot_digest": "2fc83e806ae1f615921244ae9c3fc51cb40c4654848b04b0efe43621e9b00d76"
+}

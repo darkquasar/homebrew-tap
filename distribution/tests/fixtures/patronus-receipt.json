@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "repository": "darkquasar/patronus",
+  "tag": "v2.7.1",
+  "version": "2.7.1",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_id": 50,
+  "attempt": 1,
+  "workflow_path": ".github/workflows/release.yml",
+  "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "workflow_sha256": "7bbfc735d7b0eec67497d0fcdb64d7c0812fb8d75434014511043fa3f5756dd4",
+  "event": "push",
+  "ref": "refs/tags/v2.7.1",
+  "actor_id": 28435534,
+  "triggering_actor_id": 28435534,
+  "checksums_sha256": "fba398a130816bef9236991c77d91ec459a8db9b944a070aea6c8b0a6d09a637",
+  "assets": {
+    "patronus-darwin-amd64": {
+      "size": 31,
+      "sha256": "d5d14078d9822badd7a3f996f34fa4a002b48186a67c194c1a8764211801eb1f"
+    },
+    "patronus-darwin-arm64": {
+      "size": 31,
+      "sha256": "0309da322bc63ea4418512e967ee90143fbfcd95cd5a87ab859199e1189e41a1"
+    },
+    "patronus-linux-amd64": {
+      "size": 30,
+      "sha256": "a32cbac8b73527f4c10403dc8cdff842248a5421d6188f7539498812122125e4"
+    },
+    "patronus-linux-arm64": {
+      "size": 30,
+      "sha256": "a0dfadea85eae0e253bdfdee7cc541ad316742128635520d206ab6ca861191ec"
+    },
+    "patronus-windows-amd64.exe": {
+      "size": 36,
+      "sha256": "7453be25f608a76854f5cfd1150824489c5a75067d3e63cdce73a7aff63e9315"
+    },
+    "patronus-windows-arm64.exe": {
+      "size": 36,
+      "sha256": "91f6c5afab1ab804d2e3368116d6eedd2addf198d1878833179703255ad79c74"
+    }
+  }
+}

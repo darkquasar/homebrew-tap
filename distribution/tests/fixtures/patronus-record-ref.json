@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "app": "patronus",
+  "version": "2.7.1",
+  "controller_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "configuration_digest": "ff8987dd2a6a0956cba95de7c6203a5b07f985113110507fd33e2d6c2d02dede",
+  "records_commit": "dddddddddddddddddddddddddddddddddddddddd",
+  "snapshot_digest": "8922df463a7fde802e931ab756b3aa187c41e6078e7e984ed7e7ebc79a63a869"
+}

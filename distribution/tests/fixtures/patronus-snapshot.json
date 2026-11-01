@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "payload": {
+    "identity": {
+      "app": "patronus",
+      "repository": "darkquasar/patronus",
+      "tag": "v2.7.1",
+      "version": "2.7.1",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checksums_sha256": "fba398a130816bef9236991c77d91ec459a8db9b944a070aea6c8b0a6d09a637",
+      "assets": {
+        "patronus-darwin-amd64": {
+          "size": 31,
+          "sha256": "d5d14078d9822badd7a3f996f34fa4a002b48186a67c194c1a8764211801eb1f"
+        },
+        "patronus-darwin-arm64": {
+          "size": 31,
+          "sha256": "0309da322bc63ea4418512e967ee90143fbfcd95cd5a87ab859199e1189e41a1"
+        },
+        "patronus-linux-amd64": {
+          "size": 30,
+          "sha256": "a32cbac8b73527f4c10403dc8cdff842248a5421d6188f7539498812122125e4"
+        },
+        "patronus-linux-arm64": {
+          "size": 30,
+          "sha256": "a0dfadea85eae0e253bdfdee7cc541ad316742128635520d206ab6ca861191ec"
+        },
+        "patronus-windows-amd64.exe": {
+          "size": 36,
+          "sha256": "7453be25f608a76854f5cfd1150824489c5a75067d3e63cdce73a7aff63e9315"
+        },
+        "patronus-windows-arm64.exe": {
+          "size": 36,
+          "sha256": "91f6c5afab1ab804d2e3368116d6eedd2addf198d1878833179703255ad79c74"
+        }
+      }
+    },
+    "authorization": {
+      "kind": "release-run",
+      "reference": {
+        "repository": "darkquasar/patronus",
+        "run_id": 50,
+        "attempt": 1,
+        "artifact_id": 700,
+        "artifact_sha256": "f08aaf945df26fba2983435dee5a025a9741990dbd995a9176b8e5a0fa944575",
+        "workflow_path": ".github/workflows/release.yml",
+        "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workflow_sha256": "7bbfc735d7b0eec67497d0fcdb64d7c0812fb8d75434014511043fa3f5756dd4"
+      },
+      "owner_id": 28435534,
+      "identity_digest": "12bfc60801de9b24a0d123fda5b372e8b9fe549a2b87a3feb79198c15b407bcb"
+    },
+    "initial_configuration_digest": "ff8987dd2a6a0956cba95de7c6203a5b07f985113110507fd33e2d6c2d02dede"
+  },
+  "snapshot_digest": "8922df463a7fde802e931ab756b3aa187c41e6078e7e984ed7e7ebc79a63a869"
+}
