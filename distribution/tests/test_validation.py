@@ -364,6 +364,19 @@ class Validation(unittest.TestCase):
         self.assertFalse(failed['passed'])
         self.assertEqual(failed.get('authority'), 'not-evaluated')
 
+    def test_winget_rejects_missing_or_mismatched_schema_headers(self):
+        for app in ['patronus', 'lumen']:
+            reg, snap = fixture(app, 'registration'), fixture(app, 'snapshot')
+            candidate = render('winget', reg, snap)
+            self.assertTrue(validate_candidate('winget', reg, snap, candidate)['passed'])
+            for path, data in candidate.items():
+                for changed in [data.split(b'\n', 1)[1],
+                                data.replace(b'.1.10.0.schema.json', b'.1.9.0.schema.json', 1),
+                                data.replace(b'winget-manifest.', b'other-manifest.', 1)]:
+                    with self.subTest(app=app, path=path):
+                        self.assert_rejected('winget', reg, snap,
+                                             dict(candidate, **{path: changed}), 'canonical')
+
     def test_scoop_and_winget_require_the_canonical_rendered_bytes(self):
         reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
         scoop = render('scoop', reg, snap)

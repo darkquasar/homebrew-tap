@@ -81,6 +81,16 @@ class Renderers(unittest.TestCase):
                     'url': f"https://github.com/{identity['repository']}/releases/download/{identity['tag']}/{asset}",
                     'hash': identity['assets'][asset]['sha256'], 'bin': [[asset, app]]})
 
+    def test_winget_declares_each_official_schema_header(self):
+        for app in ['patronus', 'lumen']:
+            candidate = render('winget', fixture(app, 'registration'), fixture(app, 'snapshot'))
+            for path, data in candidate.items():
+                document = yaml.safe_load(data)
+                kind = document['ManifestType']
+                expected = ('# yaml-language-server: $schema=https://aka.ms/'
+                            f'winget-manifest.{kind}.1.10.0.schema.json\n').encode()
+                self.assertTrue(data.startswith(expected), (path, data.splitlines()[0]))
+
     def test_winget_complete_portable_set_maps_x64_and_arm64(self):
         for app in ['patronus', 'lumen']:
             reg, snap = fixture(app, 'registration'), fixture(app, 'snapshot')

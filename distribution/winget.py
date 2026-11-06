@@ -25,6 +25,8 @@ def render(registration, snapshot):
     result = {}
     for suffix, document in documents.items():
         document['ManifestVersion'] = '1.10.0'
-        result[f'{directory}/{package}{suffix}.yaml'] = yaml.safe_dump(document,
-            allow_unicode=True, sort_keys=False, width=1000).encode()
+        header = ('# yaml-language-server: $schema=https://aka.ms/'
+                  f"winget-manifest.{document['ManifestType']}.1.10.0.schema.json\n")
+        result[f'{directory}/{package}{suffix}.yaml'] = (header + yaml.safe_dump(document,
+            allow_unicode=True, sort_keys=False, width=1000)).encode()
     return result
