@@ -1,0 +1,23 @@
+name: distribution-ci
+
+on:
+  pull_request:
+  push:
+    branches: [distribution-control]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.11'
+      - run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
+      - run: python3 -B -m unittest discover -s distribution/tests -p 'test_*.py' -v

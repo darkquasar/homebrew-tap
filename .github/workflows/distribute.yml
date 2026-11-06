@@ -1,0 +1,156 @@
+name: distribute
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [prepare, register, inspect-baseline, approve-baseline, retry, status]
+        required: true
+      app:
+        type: string
+        required: true
+      run_id:
+        type: string
+        required: false
+      attempt:
+        type: string
+        required: false
+      tag:
+        type: string
+        required: false
+      version:
+        type: string
+        required: false
+      channel:
+        type: string
+        required: false
+      candidate:
+        description: Configuration JSON for register, inspected identity JSON for approve-baseline
+        type: string
+        required: false
+      approve_sha:
+        type: string
+        required: false
+      source_evidence:
+        description: Optional authenticated Windows evidence locator JSON (run_id, attempt)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+# Every delivery uses destination CAS; no pending work is cancelled by concurrency groups.
+jobs:
+  authority:
+    if: >-
+      github.repository == 'darkquasar/homebrew-tap' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: package-authority
+    outputs:
+      record_ref: ${{ steps.control.outputs.record_ref }}
+    steps:
+      - name: Initialize public outcome
+        shell: bash
+        run: |
+          printf '%s\n' '{"state":"failed","failure_code":"workflow-interrupted","message":"Inspect job logs; dispatch fresh control code"}' > "$RUNNER_TEMP/distribution-authority.json"
+      - name: Admit protected immutable code before checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          test "$GITHUB_REPOSITORY" = darkquasar/homebrew-tap
+          test "$GITHUB_REF" = refs/heads/distribution-control
+          current_control_sha="$(gh api --method GET repos/darkquasar/homebrew-tap/git/ref/heads/distribution-control --jq .object.sha)"
+          test "$GITHUB_SHA" = "$current_control_sha"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.11'
+      - name: Admit source and execute isolated role
+        id: control
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DISTRIBUTION_ROLE: authority
+          DISTRIBUTION_ENVIRONMENT: package-authority
+          PACKAGE_AUTHORITY_APP_ID: ${{ vars.PACKAGE_AUTHORITY_APP_ID }}
+          PACKAGE_AUTHORITY_APP_PRIVATE_KEY: ${{ secrets.PACKAGE_AUTHORITY_APP_PRIVATE_KEY }}
+          SOURCE_READ_APP_ID: ${{ vars.SOURCE_READ_APP_ID }}
+          SOURCE_READ_APP_PRIVATE_KEY: ${{ secrets.SOURCE_READ_APP_PRIVATE_KEY }}
+        run: python3 -B -m distribution.cli --workflow --out "$RUNNER_TEMP/distribution-authority.json"
+      - name: Retain public result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: distribution-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/distribution-authority.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Summarize interrupted work
+        if: failure()
+        shell: bash
+        run: cat "$RUNNER_TEMP/distribution-authority.json" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: authority
+    if: >-
+      github.repository == 'darkquasar/homebrew-tap' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control'  && needs.authority.outputs.record_ref != ''
+    runs-on: macos-15
+    timeout-minutes: 20
+    environment: package-publisher
+    steps:
+      - name: Initialize public outcome
+        shell: bash
+        run: |
+          printf '%s\n' '{"state":"failed","failure_code":"workflow-interrupted","message":"Inspect job logs; dispatch fresh control code"}' > "$RUNNER_TEMP/distribution-publish.json"
+      - name: Admit protected immutable code before checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          test "$GITHUB_REPOSITORY" = darkquasar/homebrew-tap
+          test "$GITHUB_REF" = refs/heads/distribution-control
+          current_control_sha="$(gh api --method GET repos/darkquasar/homebrew-tap/git/ref/heads/distribution-control --jq .object.sha)"
+          test "$GITHUB_SHA" = "$current_control_sha"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.11'
+      - name: Install the accepted hash-locked validation dependencies
+        run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
+      - name: Admit source and execute isolated role
+        id: control
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DISTRIBUTION_ROLE: publish
+          DISTRIBUTION_ENVIRONMENT: package-publisher
+          DISTRIBUTION_RECORD_REF: ${{ needs.authority.outputs.record_ref }}
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_ANALYTICS: '1'
+          PACKAGE_PUBLISH_APP_ID: ${{ vars.PACKAGE_PUBLISH_APP_ID }}
+          PACKAGE_PUBLISH_APP_PRIVATE_KEY: ${{ secrets.PACKAGE_PUBLISH_APP_PRIVATE_KEY }}
+        run: python3 -B -m distribution.cli --workflow --out "$RUNNER_TEMP/distribution-publish.json"
+      - name: Retain public result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: distribution-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/distribution-publish.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Summarize interrupted work
+        if: failure()
+        shell: bash
+        run: cat "$RUNNER_TEMP/distribution-publish.json" >> "$GITHUB_STEP_SUMMARY"
