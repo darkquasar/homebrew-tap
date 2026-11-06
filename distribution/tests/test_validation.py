@@ -92,6 +92,23 @@ class Validation(unittest.TestCase):
             self.assertEqual(result['state'], 'validated')
             self.assertEqual(len(result['candidate_files']), 3)
 
+    def test_portable_metadata_without_scope_validates_and_scope_overrides_are_rejected(self):
+        for app in ['patronus', 'lumen']:
+            reg, snap = fixture(app, 'registration'), fixture(app, 'snapshot')
+            candidate = render('winget', reg, snap)
+            result = validate_candidate('winget', reg, snap, candidate)
+            self.assertTrue(result['passed'], result['errors'])
+            path = next(p for p in candidate if p.endswith('.installer.yaml'))
+            document = yaml.safe_load(candidate[path])
+            self.assertNotIn('Scope', document)
+            for scope in ['user', 'machine']:
+                altered = dict(candidate)
+                changed = dict(document, Scope=scope)
+                header = candidate[path].splitlines(keepends=True)[0]
+                altered[path] = header + yaml.safe_dump(changed, sort_keys=False).encode()
+                with self.subTest(app=app, scope=scope):
+                    self.assert_rejected('winget', reg, snap, altered)
+
     def test_winget_rejects_cross_file_identity_and_frozen_mapping_changes(self):
         reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
         candidate = render('winget', reg, snap)

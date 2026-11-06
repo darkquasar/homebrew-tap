@@ -110,7 +110,7 @@ class Renderers(unittest.TestCase):
             self.assertEqual(docs['version']['DefaultLocale'], 'en-US')
             installer = docs['installer']
             self.assertEqual(installer['InstallerType'], 'portable')
-            self.assertEqual(installer['Scope'], 'user')
+            self.assertNotIn('Scope', installer)
             self.assertEqual(installer['Commands'], [app])
             self.assertEqual(len(installer['Installers']), 2)
             for entry, native, cpu in zip(installer['Installers'], ['x64', 'arm64'], ['amd64', 'arm64']):

@@ -15,7 +15,7 @@ def render(registration, snapshot):
                                InstallerSha256=identity['assets'][asset]['sha256'].upper()))
     documents = {
         '': dict(common, DefaultLocale='en-US', ManifestType='version'),
-        '.installer': dict(common, InstallerType='portable', Scope='user',
+        '.installer': dict(common, InstallerType='portable',
             Commands=[c['identifiers']['command']], Installers=installers, ManifestType='installer'),
         '.locale.en-US': dict(common, PackageLocale='en-US', Publisher=c['owner_login'],
             PackageName=package.split('.')[1], PackageUrl=c['homepage'], License=c['license'],

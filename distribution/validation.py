@@ -276,9 +276,9 @@ def check_winget(c, identity, documents):
             and locale['PackageName'] == c['identifiers']['winget'].split('.')[1]
             and locale['PackageUrl'] == c['homepage'] and locale['License'] == c['license']
             and locale['ShortDescription'] == c['description'], 'WinGet registered locale metadata mismatch')
-    fields(installer, common + 'InstallerType Scope Commands Installers')
-    require(installer['InstallerType'] == 'portable' and installer['Scope'] == 'user'
-            and installer['Commands'] == [c['identifiers']['command']], 'WinGet portable command/scope mismatch')
+    fields(installer, common + 'InstallerType Commands Installers')
+    require(installer['InstallerType'] == 'portable'
+            and installer['Commands'] == [c['identifiers']['command']], 'WinGet portable command mismatch')
     entries = installer['Installers']
     require(type(entries) is list and len(entries) == 2, 'WinGet installer set mismatch')
     seen = set()
