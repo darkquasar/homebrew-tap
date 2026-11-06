@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "configuration": {
+    "app": "patronus",
+    "repository": "darkquasar/patronus",
+    "owner_login": "darkquasar",
+    "owner_id": 28435534,
+    "history_branch": "main",
+    "tag_pattern": "vMAJOR.MINOR.PATCH",
+    "dispatcher_app_id": 9001,
+    "dispatcher_actor_id": 8001,
+    "release_workflow_path": ".github/workflows/release.yml",
+    "homepage": "https://github.com/darkquasar/patronus",
+    "description": "Synthetic CLI for package validation",
+    "license": "GPL-3.0-only",
+    "identifiers": {
+      "brew": "patronus",
+      "scoop": "patronus",
+      "winget": "darkquasar.Patronus",
+      "command": "patronus"
+    },
+    "assets": {
+      "darwin-amd64": "patronus-darwin-amd64",
+      "darwin-arm64": "patronus-darwin-arm64",
+      "linux-amd64": "patronus-linux-amd64",
+      "linux-arm64": "patronus-linux-arm64",
+      "windows-amd64": "patronus-windows-amd64.exe",
+      "windows-arm64": "patronus-windows-arm64.exe"
+    },
+    "destinations": {
+      "brew": {
+        "repository": "darkquasar/homebrew-tap",
+        "path": "Formula/patronus.rb"
+      },
+      "scoop": {
+        "repository": "darkquasar/scoop-bucket",
+        "path": "bucket/patronus.json"
+      },
+      "winget": {
+        "repository": "darkquasar/winget-pkgs",
+        "path": "manifests/d/darkquasar/Patronus"
+      }
+    }
+  },
+  "configuration_digest": "ee5971ea11a9a13e0b9c1ee70af5dc1e2bbb0ab1f8e8e2dc2105ac916b93a186",
+  "approval": {
+    "owner_id": 28435534,
+    "reference": "fixture-only:owner-native-package-metadata",
+    "configuration_digest": "ee5971ea11a9a13e0b9c1ee70af5dc1e2bbb0ab1f8e8e2dc2105ac916b93a186"
+  }
+}

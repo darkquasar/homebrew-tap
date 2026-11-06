@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "configuration": {
+    "app": "lumen",
+    "repository": "darkquasar/lumen",
+    "owner_login": "darkquasar",
+    "owner_id": 28435534,
+    "history_branch": "main",
+    "tag_pattern": "vMAJOR.MINOR.PATCH",
+    "dispatcher_app_id": 9002,
+    "dispatcher_actor_id": 8002,
+    "release_workflow_path": ".github/workflows/release.yml",
+    "homepage": "https://github.com/darkquasar/lumen",
+    "description": "Synthetic CLI for package validation",
+    "license": "GPL-3.0-only",
+    "identifiers": {
+      "brew": "lumen",
+      "scoop": "lumen",
+      "winget": "darkquasar.Lumen",
+      "command": "lumen"
+    },
+    "assets": {
+      "darwin-amd64": "lumen-darwin-amd64",
+      "darwin-arm64": "lumen-darwin-arm64",
+      "linux-amd64": "lumen-linux-amd64",
+      "linux-arm64": "lumen-linux-arm64",
+      "windows-amd64": "lumen-windows-amd64.exe",
+      "windows-arm64": "lumen-windows-arm64.exe"
+    },
+    "destinations": {
+      "brew": {
+        "repository": "darkquasar/homebrew-tap",
+        "path": "Formula/lumen.rb"
+      },
+      "scoop": {
+        "repository": "darkquasar/scoop-bucket",
+        "path": "bucket/lumen.json"
+      },
+      "winget": {
+        "repository": "darkquasar/winget-pkgs",
+        "path": "manifests/d/darkquasar/Lumen"
+      }
+    }
+  },
+  "configuration_digest": "b9a3a1f063c0aeb51bfe38b8de501df3ff598d3edb727858fd35b65d9ac5e9b8",
+  "approval": {
+    "owner_id": 28435534,
+    "reference": "fixture-only:owner-native-package-metadata",
+    "configuration_digest": "b9a3a1f063c0aeb51bfe38b8de501df3ff598d3edb727858fd35b65d9ac5e9b8"
+  }
+}

@@ -170,3 +170,50 @@ lifetime, safe downloads, and independent isolated job execution. T2 must bind
 receipt upload to the real successful attempt and preserve non-fatal receipt-only
 failure policy. Native/ARM/package checks belong to later milestones. Those
 requirements are not established by T1's invented API evidence.
+
+## T3 native candidate preflight
+
+Registration approval validates the T1 structure and provenance; it does not
+guarantee native package acceptance. Before requesting approval of presentation
+metadata, render and validate a candidate for every intended channel. Homebrew
+currently accepts descriptions of at most 80 characters, starting with a capital
+letter (with its documented product-name exceptions), without a leading article,
+the formula name, surrounding spaces or a trailing full stop. WinGet's vendored
+1.10 schema requires `ShortDescription` to contain 3–256 characters. The real
+native tools and vendored schemas remain authoritative. Do not truncate or
+rewrite approved metadata silently; correct the registration and obtain owner
+approval before rendering again. The native-registration fixtures demonstrate
+this separate presentation approval while retaining the frozen release identity.
+
+Install the hash-locked `validation-requirements.txt` in a Python 3.12–3.14
+environment. The maintainer entry point is:
+
+```sh
+python -B -m distribution.validation --channel scoop --app patronus \
+  --registration registration.json --snapshot snapshot.json \
+  --candidate-dir staging --out validation.json
+```
+
+Use `brew` or `winget` for the other channels. Stage the exact path/byte mapping
+returned by `validation.render`; all channels reject edits or alternate encodings
+of those bytes, even when semantically equivalent. A successful result binds the
+candidate, snapshot and configuration digests. Every result explicitly records
+`authority: not-evaluated`: these local structural checks never authorize a
+release. T4 must admit the caller and load the protected authorized snapshot
+through T1 before validation and publication, and must reject changed bytes.
+
+Homebrew validation first warms its toolchain against a separate syntax probe
+with a five-minute bound, then checks each candidate with Homebrew's own Ruby and
+style checker, each bounded at 60 seconds. Toolchain/information failures produce
+`validation-unavailable`; native candidate errors produce `validation-failed`.
+The subprocess environment forwards only named runtime/cache settings, without
+GitHub tokens, App keys or Ruby/Bundler injection settings. T4 must bootstrap
+tools before minting publication credentials and preserve the workflow's overall
+job timeout. T4/T5 onboarding must run this preflight before registering metadata;
+the CLI here does not implement that future credentialed workflow.
+
+```text
++-------------------+  => render bytes  +------------------+  => native/schema  +-------------+
+| Approved metadata | ===============> | Staged candidate | =================> | Byte proof  |
++-------------------+                  +------------------+                    +-------------+
+```
