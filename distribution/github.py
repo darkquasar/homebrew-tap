@@ -611,12 +611,109 @@ class AppCredentials:
         return errors
 
 
-class WindowsSource:
-    """Consume independently downloaded, run-bound evidence from an available Windows job.
+def source_command(package_id):
+    return ['winget','show','--id',package_id,'--exact','--source','winget','--versions',
+            '--accept-source-agreements','--disable-interactivity']
 
-    No Windows job is added by T4. Without such evidence indexing stays unknown.
-    The supplied locator selects public evidence; it cannot supply observations.
-    """
+
+def source_versions(package_id, exit_code, stdout):
+    """Only a successful version table or Microsoft's exact no-match HRESULT is evidence."""
+    require(type(exit_code) is int and type(stdout) is str and len(stdout.encode()) <= 65536,
+            'invalid source command result')
+    if exit_code & 0xffffffff == 0x8A150014:  # APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND
+        return []
+    require(exit_code == 0, 'WinGet source query failed; visibility unknown')
+    clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',stdout)
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    separators = [i for i,line in enumerate(lines) if re.fullmatch(r'-{3,}',line)]
+    require(len(separators) == 1, 'WinGet version table unavailable')
+    start = separators[0]
+    require(start >= 1 and lines[start-1].split() in [['Version'],['Version','Channel']]
+            and any('['+package_id+']' in line for line in lines[:start-1]),
+            'WinGet package/table identity unavailable')
+    rows = lines[start+1:]
+    require(rows and all(matches(r'[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}',row) for row in rows),
+            'WinGet version table incomplete or unsupported')
+    return list(dict.fromkeys(row for row in rows if matches(VERSION,row)))
+
+
+def run_source_command(args, timeout):
+    """Bound native query time and both output streams without invoking a shell."""
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr)
+        deadline = time.monotonic()+timeout
+        try:
+            while process.poll() is None:
+                require(time.monotonic() < deadline, 'WinGet command timed out')
+                require(os.fstat(stdout.fileno()).st_size <= 65536
+                        and os.fstat(stderr.fileno()).st_size <= 65536, 'WinGet output exceeds bound')
+                try:
+                    process.wait(timeout=min(0.1,max(0.001,deadline-time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    pass
+            stdout.seek(0)
+            stderr.seek(0)
+            out,err = stdout.read(65537),stderr.read(65537)
+            require(len(out) <= 65536 and len(err) <= 65536, 'WinGet output exceeds bound')
+            return subprocess.CompletedProcess(args,process.returncode,out,err)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+
+
+def collect_windows_source(registration, github, *, command=None, runner=None):
+    """Read-only T1 admission needs no privileged role environment or App keys."""
+    from .trust import authorize_controller
+    import platform
+    require(not any(k.endswith('_APP_PRIVATE_KEY') and v for k,v in os.environ.items())
+            and not os.environ.get('DISTRIBUTION_ENVIRONMENT'), 'privileged key/environment in source runner')
+    context = github.controller_context()
+    require(context['role'] == 'authority' and context['mode'] in {'prepare','approve-baseline','retry','status'},
+            'source query requires an eligible admitted request')
+    authorize_controller(registration,context,github)
+    runner = runner or dict(os=platform.system(),version=platform.version(),architecture=platform.machine(),
+        image_os=os.environ.get('ImageOS',''),image_version=os.environ.get('ImageVersion',''))
+    fields(runner,'os version architecture image_os image_version')
+    require(runner['os'] == 'Windows' and all(type(v) is str and v for v in runner.values()),
+            'Windows runner identity unavailable')
+    jobs = github.pages(f'/repos/{CONTROL_REPOSITORY}/actions/runs/{context["run_id"]}'
+                        f'/attempts/{context["attempt"]}/jobs','jobs')
+    jobs = [job for job in jobs if job['name'] == 'winget-source']
+    require(len(jobs) == 1 and positive_id(jobs[0]['id']) and jobs[0]['head_sha'] == context['sha']
+            and jobs[0]['status'] == 'in_progress'
+            and any(label.lower().startswith('windows') for label in jobs[0]['labels']),
+            'current Windows query job unavailable')
+    command = command or run_source_command
+    def execute(args,timeout):
+        value = command(args,timeout)
+        require(type(value.returncode) is int and type(value.stdout) is bytes and type(value.stderr) is bytes
+                and len(value.stdout) <= 65536 and len(value.stderr) <= 65536,
+                'native query result exceeds bound or is invalid')
+        return dict(command=args,exit=value.returncode,stdout=value.stdout.decode('utf-8-sig'),
+                    stderr=value.stderr.decode('utf-8-sig'))
+    c = registration['configuration']
+    document = dict(schema_version=2,repository=CONTROL_REPOSITORY,controller_sha=context['sha'],
+        run_id=context['run_id'],attempt=context['attempt'],job_id=jobs[0]['id'],app=c['app'],
+        package_id=c['identifiers']['winget'],source='winget',runner_os='Windows',runner_version=runner,
+        observed_at=datetime.now(timezone.utc).isoformat())
+    try:
+        client = execute(['winget','--version'],30)
+        document.update(manager_probe=client,manager_version=client['stdout'].strip())
+        require(client['exit'] == 0 and len(client['stdout'].encode()) <= 128
+                and len(client['stderr'].encode()) <= 4096
+                and matches(r'v?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?',client['stdout'].strip()),
+                'WinGet client version unavailable')
+        query = execute(source_command(c['identifiers']['winget']),180)
+        document.update(query)
+        document['versions'] = source_versions(c['identifiers']['winget'],query['exit'],query['stdout'])
+        return document
+    except (ValueError,OSError,subprocess.SubprocessError) as error:
+        return dict(document,state='unknown',failure_code='observation-unavailable',message=str(error))
+
+
+class WindowsSource:
+    """Independently verify a completed Windows query job in the current admitted run."""
     def __init__(self,github,locator=None):
         self.github = github
         self.locator = locator
@@ -624,19 +721,20 @@ class WindowsSource:
     def observe(self,registration,version):
         import io
         import zipfile
+        from .trust import authorize_controller
+        context = self.github.controller_context()
+        require(context['role'] == 'publish', 'source evidence requires admitted publisher')
+        authorize_controller(registration,context,self.github)
         locator = self.locator
         if locator is None:
-            locator = strict_json(os.environ.get('DISTRIBUTION_SOURCE_EVIDENCE','{}'))
+            locator = dict(run_id=context['run_id'],attempt=context['attempt'])
         fields(locator,'run_id attempt')
-        require(positive_id(locator['run_id']) and positive_id(locator['attempt']), 'source locator unavailable')
+        require(positive_id(locator['run_id']) and positive_id(locator['attempt'])
+                and locator == dict(run_id=context['run_id'],attempt=context['attempt']),
+                'source evidence must belong to the current admitted run/attempt')
         c = validate_registration(registration)['configuration']
-        sha = self.github.controller_context()['sha']
+        sha = context['sha']
         run_id,attempt = locator['run_id'],locator['attempt']
-        run = self.github.run(CONTROL_REPOSITORY,run_id,attempt)
-        expected = dict(id=run_id,attempt=attempt,repository=CONTROL_REPOSITORY,head_sha=sha,
-            head_branch=CONTROL_BRANCH,event='workflow_dispatch',workflow_path='.github/workflows/distribute.yml',
-            actor_id=OWNER_ID,triggering_actor_id=OWNER_ID,status='completed',conclusion='success')
-        require(all(run.get(k) == v for k,v in expected.items()), 'source run is not an admitted owner/control run')
         artifact = self.github.artifact_named(CONTROL_REPOSITORY,run_id,f'winget-source-{run_id}-{attempt}')
         require(artifact['head_sha'] == sha, 'source artifact revision mismatch')
         with zipfile.ZipFile(io.BytesIO(artifact['content'])) as archive:
@@ -646,19 +744,35 @@ class WindowsSource:
                     'unsafe source evidence member')
             observation = strict_json(archive.read(info))
         fields(observation,'schema_version repository controller_sha run_id attempt job_id app package_id source '
-               'runner_os command exit versions observed_at manager_version')
-        require(observation['schema_version'] == 1 and observation['repository'] == CONTROL_REPOSITORY
+               'runner_os runner_version command exit stdout stderr versions observed_at manager_version manager_probe')
+        require(type(observation['schema_version']) is int and observation['schema_version'] == 2
+                and observation['repository'] == CONTROL_REPOSITORY
                 and observation['controller_sha'] == sha and observation['run_id'] == run_id
                 and observation['attempt'] == attempt and observation['app'] == c['app']
                 and observation['package_id'] == c['identifiers']['winget']
                 and observation['source'] == 'winget' and observation['runner_os'] == 'Windows'
-                and type(observation['exit']) is int and observation['exit'] == 0
-                and observation['command'] == ['winget','show','--id',c['identifiers']['winget'],
-                    '--exact','--source','winget','--versions'], 'source evidence identity/command mismatch')
-        require(type(observation['versions']) is list and all(matches(VERSION,v) for v in observation['versions'])
-                and type(observation['manager_version']) is str and observation['manager_version']
-                and type(observation['observed_at']) is str, 'source evidence incomplete')
-        datetime.fromisoformat(observation['observed_at'].replace('Z','+00:00'))
+                and observation['command'] == source_command(c['identifiers']['winget']),
+                'source evidence identity/command mismatch')
+        require(type(observation['versions']) is list
+                and observation['versions'] == source_versions(c['identifiers']['winget'],
+                    observation['exit'],observation['stdout'])
+                and type(observation['stderr']) is str and len(observation['stderr'].encode()) <= 65536,
+                'source versions differ from retained command result')
+        runner = observation['runner_version']
+        fields(runner,'os version architecture image_os image_version')
+        require(runner['os'] == 'Windows' and all(type(v) is str and v for v in runner.values()),
+                'Windows runner version unavailable')
+        probe = observation['manager_probe']
+        fields(probe,'command exit stdout stderr')
+        require(probe['command'] == ['winget','--version'] and type(probe['exit']) is int and probe['exit'] == 0
+                and type(probe['stdout']) is str and type(probe['stderr']) is str
+                and len(probe['stdout'].encode()) <= 128 and len(probe['stderr'].encode()) <= 4096
+                and matches(r'v?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?',probe['stdout'].strip())
+                and probe['stdout'].strip() == observation['manager_version'], 'WinGet client evidence unavailable')
+        require(type(observation['observed_at']) is str, 'source observation time unavailable')
+        observed = datetime.fromisoformat(observation['observed_at'].replace('Z','+00:00'))
+        require(observed.tzinfo is not None and -300 <= (datetime.now(timezone.utc)-observed).total_seconds() <= 3600,
+                'source observation is stale or in the future')
         jobs = self.github.pages(f'/repos/{CONTROL_REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs','jobs')
         matching = [j for j in jobs if j['id'] == observation['job_id']]
         require(len(matching) == 1 and matching[0]['name'] == 'winget-source'

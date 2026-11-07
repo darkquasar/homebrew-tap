@@ -33,7 +33,7 @@ def workflow_arguments(argv):
     event=strict_json(read_regular(Path(os.environ['GITHUB_EVENT_PATH'])))
     inputs=event.get('inputs')
     require(type(inputs) is dict and all(type(v) is str for v in inputs.values()), 'workflow inputs must be strings')
-    allowed={'mode','app','run_id','attempt','tag','version','channel','candidate','approve_sha','source_evidence'}
+    allowed={'mode','app','run_id','attempt','tag','version','channel','candidate','approve_sha'}
     require(set(inputs) <= allowed, 'unknown workflow inputs')
     mode=inputs.get('mode')
     require(mode in {'register','prepare','inspect-baseline','approve-baseline','retry','status'}, 'unknown workflow mode')
@@ -67,17 +67,39 @@ def workflow_arguments(argv):
         command += ['--version',inputs.get('version','')]
     if mode == 'retry':
         command += ['--channel',inputs.get('channel','')]
-    if inputs.get('source_evidence'):
-        from .contracts import fields, positive_id
-        locator=strict_json(inputs['source_evidence'])
-        fields(locator,'run_id attempt')
-        require(all(positive_id(locator[k]) for k in locator), 'invalid source evidence locator')
-        os.environ['DISTRIBUTION_SOURCE_EVIDENCE']=encode(locator).decode()
     return command
 
 
-def main(argv=None, *, github=None, credentials=None):
+def observe_source(argv, *, github=None, command=None, runner=None):
+    """Secret-free workflow entry: protected registration supplies the query identity."""
+    from .github import collect_windows_source
+    parser=argparse.ArgumentParser(description='Observe registered WinGet default-source versions')
+    parser.add_argument('--out',required=True)
+    args=parser.parse_args(argv)
+    try:
+        request=workflow_arguments(argv)
+        event=strict_json(read_regular(Path(os.environ['GITHUB_EVENT_PATH'])))
+        mode,app=request[0],event['inputs']['app']
+        github=github or adapter(mode,app)
+        context=github.controller_context()
+        require(context['mode'] == mode and context['app'] == app, 'source/request context mismatch')
+        entry=github.file(CONTROL_REPOSITORY,context['sha'],f'.distribution/registrations/{app}.json')
+        require(entry['type'] == 'file', 'protected registration must be regular')
+        registration=validate_registration(strict_json(entry['content']))
+        document=collect_windows_source(registration,github,command=command,runner=runner)
+    except Exception as error:
+        document=dict(state='unknown',failure_code='observation-unavailable',message=str(error))
+    path=Path(args.out)
+    require(not path.is_symlink(), 'output symlink denied')
+    path.write_bytes(encode(document))
+    print(encode(document).decode())
+    return 1 if document.get('state') == 'unknown' else 0
+
+
+def main(argv=None, *, github=None, credentials=None, source_command=None, source_runner=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == '--observe-source':
+        return observe_source(argv[1:],github=github,command=source_command,runner=source_runner)
     if argv and argv[0] == '--workflow':
         try:
             argv=workflow_arguments(argv[1:])

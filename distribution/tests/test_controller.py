@@ -392,6 +392,202 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'), tip)
 
 
+class WindowsQueryTests(unittest.TestCase):
+    def service(self, mode='prepare'):
+        gh = test_trust.GitHub()
+        gh.context['mode'] = mode
+        gh.controller_context = lambda: dict(gh.context)
+        if mode != 'prepare':
+            gh.controller_run.update(actor_id=OWNER_ID,triggering_actor_id=OWNER_ID)
+        gh.pages = lambda path,key: [dict(id=90,name='winget-source',head_sha='c'*40,
+            labels=['windows-2025'],status='in_progress',conclusion=None)]
+        return gh
+
+    def runner(self):
+        return dict(os='Windows',version='fixture Windows build',architecture='AMD64',
+                    image_os='win25',image_version='fixture-image')
+
+    def test_admitted_native_query_records_only_version_table_rows(self):
+        from distribution.github import collect_windows_source
+        gh = self.service()
+        calls=[]
+        def command(args,timeout):
+            calls.append((args,timeout))
+            output = b'v1.29.380\n' if args == ['winget','--version'] else (
+                b'Found Patronus [darkquasar.Patronus]\nVersion\n-------\n2.7.1\n2.6.0\n')
+            return subprocess.CompletedProcess(args,0,output,b'')
+        result=collect_windows_source(gh.registration,gh,command=command,runner=self.runner())
+        self.assertEqual(result.get('versions'),['2.7.1','2.6.0'])
+        self.assertEqual(result['run_id'],40)
+        self.assertEqual(result['job_id'],90)
+        self.assertEqual(result['manager_version'],'v1.29.380')
+        self.assertEqual(result['runner_version']['image_version'],'fixture-image')
+        self.assertEqual(result['command'],['winget','show','--id','darkquasar.Patronus',
+            '--exact','--source','winget','--versions','--accept-source-agreements','--disable-interactivity'])
+        self.assertEqual(calls, [(['winget','--version'],30),(result['command'],180)])
+        self.assertEqual(result['stdout'], 'Found Patronus [darkquasar.Patronus]\nVersion\n-------\n2.7.1\n2.6.0\n')
+
+    def test_current_dispatch_bot_run_can_supply_completed_windows_evidence_to_publisher(self):
+        from distribution.github import collect_windows_source,GitHub,WindowsSource
+        import hashlib,zipfile
+        gh=self.service()
+        def command(args,timeout):
+            return subprocess.CompletedProcess(args,0,b'v1.29.380\n' if args == ['winget','--version'] else
+                b'Found Patronus [darkquasar.Patronus]\nVersion\n-------\n2.7.1\n',b'')
+        document=collect_windows_source(gh.registration,gh,command=command,runner=self.runner())
+        gh.context['role']='publish'
+        gh.controller_run.update(status='in_progress',conclusion=None)
+        job=dict(id=90,name='winget-source',head_sha='c'*40,labels=['windows-2025'],
+                 status='completed',conclusion='success')
+        def archive():
+            stream=io.BytesIO()
+            with zipfile.ZipFile(stream,'w') as zipped:
+                zipped.writestr('source.json',json.dumps(document))
+            return stream.getvalue()
+        def pages(path,key):
+            if key == 'jobs':
+                return [job]
+            return [dict(id=1,name='winget-source-40-1',expired=False,
+                digest='sha256:'+hashlib.sha256(archive()).hexdigest(),workflow_run={'id':40,'head_sha':'c'*40})]
+        gh.pages=pages
+        gh.request=lambda *args,**kwargs: archive()
+        gh.artifact_named=lambda *args: GitHub.artifact_named(gh,*args)
+        source=WindowsSource(gh,{'run_id':40,'attempt':1})
+        try:
+            result=source.observe(gh.registration,'2.7.1')
+        except ValueError as error:
+            self.fail('Admitted current-run Windows evidence must be consumable: '+str(error))
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['versions'],['2.7.1'])
+        for change in ['actor','query-bytes','job','stale','digest','package','timestamp','attempt']:
+            with self.subTest(change=change):
+                old_run=copy.deepcopy(gh.controller_run)
+                old_document=copy.deepcopy(document)
+                old_job=copy.deepcopy(job)
+                old_request=gh.request
+                if change=='actor':gh.controller_run['triggering_actor_id']=8002
+                if change=='query-bytes':document['versions']=['9.9.9']
+                if change=='job':job['conclusion']='failure'
+                if change=='stale':gh.control_tip='a'*40
+                if change=='digest':gh.request=lambda *args,**kwargs: b'changed artifact bytes'
+                if change=='package':document['package_id']='other.Package'
+                if change=='timestamp':document['observed_at']='2020-01-01T00:00:00Z'
+                if change=='attempt':document['attempt']=2
+                with self.assertRaises(ValueError):source.observe(gh.registration,'2.7.1')
+                gh.controller_run=old_run
+                gh.request=old_request
+                document.clear();document.update(old_document)
+                job.clear();job.update(old_job)
+
+    def test_workflow_source_entry_reads_protected_registration_and_retains_query_failure(self):
+        from distribution.cli import main
+        gh=self.service('status')
+        gh.file=lambda repo,sha,path: {'type':'file','content':encode(gh.registration)}
+        for code in [0,0x8A150045]:
+            with self.subTest(code=code),tempfile.TemporaryDirectory() as directory:
+                event=Path(directory)/'event.json'
+                event.write_bytes(encode({'inputs':dict(mode='status',app='patronus',version='2.7.1')}))
+                output=Path(directory)/'source.json'
+                calls=[]
+                def command(args,timeout):
+                    calls.append(args)
+                    if args==['winget','--version']:
+                        return subprocess.CompletedProcess(args,0,b'v1.29.380\n',b'')
+                    return subprocess.CompletedProcess(args,code,b'Found Patronus [darkquasar.Patronus]\nVersion\n-------\n2.7.1\n',b'query diagnostic')
+                with patch.dict('os.environ',{'GITHUB_EVENT_PATH':str(event)},clear=True),patch('sys.stdout',new=io.StringIO()):
+                    try:
+                        exit_code=main(['--observe-source','--out',str(output)],github=gh,
+                                       source_command=command,source_runner=self.runner())
+                    except (TypeError,SystemExit) as error:
+                        self.fail('Workflow source entry must execute the admitted query: '+str(error))
+                self.assertEqual(exit_code,0 if code==0 else 1)
+                document=json.loads(output.read_bytes())
+                self.assertEqual(document['exit'],code)
+                self.assertEqual(document['stderr'],'query diagnostic')
+                if code:
+                    self.assertEqual(document['state'],'unknown')
+                else:
+                    self.assertEqual(document['versions'],['2.7.1'])
+                self.assertEqual(len(calls),2)
+
+    def test_read_only_query_rejects_untrusted_context_before_executing_client(self):
+        from distribution.github import collect_windows_source
+        for change in ['actor','stale','ref','registry','role','job','key','environment']:
+            with self.subTest(change=change):
+                gh=self.service()
+                env={}
+                if change=='actor':gh.controller_run['triggering_actor_id']=8002
+                if change=='stale':gh.control_tip='a'*40
+                if change=='ref':gh.context['ref']='refs/heads/main'
+                if change=='registry':gh.registrations=[]
+                if change=='role':gh.context['role']='publish'
+                if change=='job':gh.pages=lambda *args: []
+                if change=='key':env['PACKAGE_AUTHORITY_APP_PRIVATE_KEY']='must-not-be-here'
+                if change=='environment':env['DISTRIBUTION_ENVIRONMENT']='package-authority'
+                calls=[]
+                with patch.dict('os.environ',env,clear=True):
+                    with self.assertRaises(ValueError):
+                        collect_windows_source(gh.registration,gh,
+                            command=lambda *args:calls.append(args),runner=self.runner())
+                self.assertEqual(calls,[])
+
+    def test_both_apps_and_owner_modes_use_their_protected_package_id(self):
+        from distribution.github import collect_windows_source
+        for app in ['patronus','lumen']:
+            for mode in ['approve-baseline','retry','status']:
+                with self.subTest(app=app,mode=mode):
+                    gh=self.service(mode)
+                    gh.registration=fixture(app,'registration')
+                    gh.registrations=[gh.registration]
+                    gh.context['app']=app
+                    package_id=gh.registration['configuration']['identifiers']['winget']
+                    calls=[]
+                    def command(args,timeout):
+                        calls.append(args)
+                        return subprocess.CompletedProcess(args,0,b'v1.29.380\n' if args==['winget','--version'] else
+                            ('Found app ['+package_id+']\nVersion Channel\n---------------\n2.7.1\n').encode(),b'')
+                    document=collect_windows_source(gh.registration,gh,command=command,runner=self.runner())
+                    self.assertEqual(document['package_id'],package_id)
+                    self.assertEqual(document['versions'],['2.7.1'])
+                    self.assertEqual(calls[1][3],package_id)
+
+    def test_only_exact_no_match_hresult_establishes_empty_source_versions(self):
+        from distribution.github import collect_windows_source
+        for exit_code in [0x8A150014,0x8A150014-2**32,0x8A150045,1,0]:
+            with self.subTest(exit=exit_code):
+                gh=self.service()
+                def command(args,timeout):
+                    return subprocess.CompletedProcess(args,0,b'v1.29.380\n',b'') if args==['winget','--version'] else (
+                        subprocess.CompletedProcess(args,exit_code,b'No package found matching input criteria.\n',b'diagnostic'))
+                document=collect_windows_source(gh.registration,gh,command=command,runner=self.runner())
+                self.assertEqual(document['exit'],exit_code)
+                if exit_code & 0xffffffff == 0x8A150014:
+                    self.assertEqual(document['versions'],[])
+                    self.assertNotIn('state',document)
+                else:
+                    self.assertEqual(document['state'],'unknown')
+                    self.assertNotIn('versions',document)
+
+    def test_query_diagnostics_and_non_table_version_strings_cannot_claim_visibility(self):
+        from distribution.github import source_versions
+        prefix='Diagnostic version 9.9.9\nFound Patronus [darkquasar.Patronus]\nVersion\n-------\n'
+        self.assertEqual(source_versions('darkquasar.Patronus',0,prefix+'2.7.1\n2.8.0-beta\n'),['2.7.1'])
+        for output in ['2.7.1\n',prefix,prefix+'query failed\n',prefix.replace('darkquasar.Patronus','other.App')+'2.7.1\n']:
+            with self.subTest(output=output),self.assertRaises(ValueError):
+                source_versions('darkquasar.Patronus',0,output)
+
+    def test_actual_process_query_boundary_enforces_time_and_output_limits(self):
+        from distribution.github import run_source_command
+        import sys
+        result=run_source_command([sys.executable,'-c','print("query fixture")'],5)
+        self.assertEqual(result.stdout,b'query fixture\n')
+        self.assertEqual(result.returncode,0)
+        with self.assertRaisesRegex(ValueError,'timed out'):
+            run_source_command([sys.executable,'-c','import time; time.sleep(5)'],0.1)
+        with self.assertRaisesRegex(ValueError,'exceeds bound'):
+            run_source_command([sys.executable,'-c','print("x"*70000)'],5)
+
+
 class AdapterTests(unittest.TestCase):
     def test_publisher_grants_are_per_repository_and_one_denial_preserves_other_grants(self):
         from distribution.github import AppCredentials,Transport,APIError
@@ -574,15 +770,33 @@ class AdapterTests(unittest.TestCase):
 
     def test_windows_source_consumes_authenticated_run_artifact_and_rejects_forged_actor(self):
         from distribution.github import GitHub,WindowsSource
-        import hashlib,io,zipfile
-        context = dict(sha='c'*40)
+        import base64,hashlib,io,zipfile
+        from datetime import datetime,timezone
+        context = dict(repository=CONTROL_REPOSITORY,ref='refs/heads/distribution-control',sha='c'*40,
+                       run_id=80,attempt=1,mode='status',role='publish',app='patronus')
         reg = fixture('patronus','registration')
-        evidence = dict(schema_version=1,repository=CONTROL_REPOSITORY,controller_sha='c'*40,
+        evidence = dict(schema_version=2,repository=CONTROL_REPOSITORY,controller_sha='c'*40,
             run_id=80,attempt=1,job_id=90,app='patronus',package_id='darkquasar.Patronus',source='winget',
-            runner_os='Windows',command=['winget','show','--id','darkquasar.Patronus','--exact','--source','winget','--versions'],
-            exit=0,versions=['2.7.1'],observed_at='2026-11-07T00:00:00Z',manager_version='v1.29.380')
+            runner_os='Windows',runner_version=WindowsQueryTests().runner(),
+            command=['winget','show','--id','darkquasar.Patronus','--exact','--source','winget','--versions',
+                     '--accept-source-agreements','--disable-interactivity'],
+            exit=0,stdout='Found Patronus [darkquasar.Patronus]\nVersion\n-------\n2.7.1\n',stderr='',
+            versions=['2.7.1'],observed_at=datetime.now(timezone.utc).isoformat(),manager_version='v1.29.380',
+            manager_probe=dict(command=['winget','--version'],exit=0,stdout='v1.29.380\n',stderr=''))
         actor = OWNER_ID
         def service(method,path,body=None,**kwargs):
+            if path.endswith('/git/ref/heads/distribution-control'):
+                return {'object':dict(type='commit',sha='c'*40)}
+            if path.endswith('/git/commits/'+'c'*40):
+                return {'tree':{'sha':'a'*40}}
+            trees={'a':dict(path='.distribution',type='tree',mode='040000',sha='b'*40),
+                   'b':dict(path='registrations',type='tree',mode='040000',sha='d'*40),
+                   'd':dict(path='patronus.json',type='blob',mode='100644',sha='e'*40)}
+            for key,entry in trees.items():
+                if path.endswith('/git/trees/'+key*40):
+                    return {'tree':[entry]}
+            if path.endswith('/git/blobs/'+'e'*40):
+                return dict(encoding='base64',content=base64.b64encode(encode(reg)).decode())
             if '/attempts/1/jobs' in path:
                 return {'jobs':[dict(id=90,name='winget-source',head_sha='c'*40,labels=['windows-2025'],
                     status='completed',conclusion='success')]}

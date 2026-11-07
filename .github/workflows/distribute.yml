@@ -32,10 +32,6 @@ on:
       approve_sha:
         type: string
         required: false
-      source_evidence:
-        description: Optional authenticated Windows evidence locator JSON (run_id, attempt)
-        type: string
-        required: false
 
 permissions:
   contents: read
@@ -98,11 +94,62 @@ jobs:
         shell: bash
         run: cat "$RUNNER_TEMP/distribution-authority.json" >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
+  winget-source:
+    name: winget-source
     needs: authority
     if: >-
       github.repository == 'darkquasar/homebrew-tap' &&
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control'  && needs.authority.outputs.record_ref != ''
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control' &&
+      needs.authority.outputs.record_ref != ''
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize unavailable observation
+        run: |
+          printf '%s\n' '{"state":"unknown","failure_code":"observation-unavailable","message":"Inspect Windows query job logs"}' > "$RUNNER_TEMP/source.json"
+      - name: Admit protected immutable code before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          test "$GITHUB_REPOSITORY" = darkquasar/homebrew-tap
+          test "$GITHUB_REF" = refs/heads/distribution-control
+          current_control_sha="$(gh api --method GET repos/darkquasar/homebrew-tap/git/ref/heads/distribution-control --jq .object.sha)"
+          test "$GITHUB_SHA" = "$current_control_sha"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - name: Query admitted registered package without installation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DISTRIBUTION_ROLE: authority
+        run: python -B -m distribution.cli --observe-source --out "$RUNNER_TEMP/source.json"
+      - name: Retain bounded source observation and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: winget-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [authority, winget-source]
+    if: >-
+      always() && !cancelled() && needs.authority.result == 'success' &&
+      github.repository == 'darkquasar/homebrew-tap' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control' &&
+      needs.authority.outputs.record_ref != ''
     runs-on: macos-15
     timeout-minutes: 20
     environment: package-publisher
