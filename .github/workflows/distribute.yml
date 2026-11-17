@@ -155,6 +155,7 @@ jobs:
     uses: ./.github/workflows/native-checks.yml
     with:
       mode: release
+      app: ${{ inputs.app }}
       record_ref: ${{ needs.authority.outputs.record_ref }}
       label: native
 
@@ -190,7 +191,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: '3.12.11'
+          # 3.12.11 has no macOS build in the setup-python manifest; 3.12.10 does (arm64 and x64).
+          python-version: '3.12.10'
       - name: Install the accepted hash-locked validation dependencies
         run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
       - name: Require fresh native evidence directories

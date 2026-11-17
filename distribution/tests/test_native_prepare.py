@@ -544,5 +544,106 @@ class Preservation(Workspace):
         self.assertEqual((home / 'unrelated.txt').read_text(), 'a real user file')
 
 
+class NativeNames(Workspace):
+    def test_names_for_a_second_app_come_from_its_registration(self):
+        from distribution.native.prepare import native_names, stage_candidates
+        lumen = fixture('lumen', 'native-registration')
+        names = native_names(lumen, '2.7.1')
+        self.assertEqual(names, dict(
+            app='lumen', tap='darkquasar/tap', formula='lumen', formula_path='Formula/lumen.rb',
+            scoop_bucket='darkquasar', scoop_package='lumen', scoop_path='bucket/lumen.json',
+            winget_identifier='darkquasar.Lumen', winget_path='manifests/d/darkquasar/Lumen/2.7.1',
+            command='lumen', assets=lumen['configuration']['assets']))
+        self.assertEqual(native_names(registration(), '2.7.1')['formula_path'], 'Formula/patronus.rb')
+        from distribution.native.prepare import fixture_snapshot
+        assets = {name: name.encode() for name in lumen['configuration']['assets'].values()}
+        result = stage_candidates(self.out, lumen, fixture_snapshot(lumen, '2.7.1', assets),
+                                  loopback=LOOPBACK, assets=assets)
+        self.assertEqual(result['names'], names)
+        for channel, path in [('brew', 'Formula/lumen.rb'), ('scoop', 'bucket/lumen.json'),
+                              ('winget', 'manifests/d/darkquasar/Lumen/2.7.1/darkquasar.Lumen.installer.yaml')]:
+            self.assertTrue((self.out / 'staging' / channel / path).is_file(), path)
+
+    def test_package_identity_and_command_are_separate_fields(self):
+        from distribution.native.prepare import native_names
+        names = native_names(registration(), '2.7.1')
+        self.assertEqual({k: names[k] for k in ['formula', 'scoop_package', 'winget_identifier', 'command']},
+                         dict(formula='patronus', scoop_package='patronus',
+                              winget_identifier='darkquasar.Patronus', command='patronus'))
+
+
+class VersionToken(unittest.TestCase):
+    def test_reported_version_must_be_an_exact_token(self):
+        from distribution.native.prepare import version_matches
+        self.assertTrue(version_matches('patronus version v2.7.1', '2.7.1'))
+        self.assertTrue(version_matches('patronus version v2.7.1\n', '2.7.1'))
+        for output in ['patronus version v2.7.10', 'patronus version v2.7.1-rc1', 'patronus version v2.7.0',
+                       'patronus version v2.7.1+build', 'patronus version v12.7.1', 'patronus version 2.7.1',
+                       'patronus version v2.7.1.1', 'patronus version v2x7x1', '']:
+            with self.subTest(output=output):
+                self.assertFalse(version_matches(output, '2.7.1'))
+
+    def test_version_check_command_reports_the_mismatch(self):
+        import contextlib, io
+        from distribution.native.prepare import main
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(['version-check', '--version', '2.7.1', '--output', 'patronus version v2.7.1']), 0)
+            self.assertEqual(main(['version-check', '--version', '2.7.1', '--output', 'patronus version v2.7.10']), 1)
+        self.assertIn('version-mismatch: expected v2.7.1, got: patronus version v2.7.10', out.getvalue())
+
+
+class MissingSelection(SummaryInputs):
+    def test_missing_selection_fails_only_brew_and_keeps_windows_evidence(self):
+        from distribution.bottles import native_failures, validate_native_checks
+        from distribution.native.prepare import main
+        reports = Path(self.directory.name) / 'reports'
+        reports.mkdir()
+        for index, document in enumerate(r for r in self.reports if r['manager'] != 'brew'):
+            (reports / f'report-{index}.json').write_text(json.dumps(document))
+        pins = Path(self.directory.name) / 'pins.json'
+        pins.write_text(json.dumps({'statically_mapped': {}}))
+        out = Path(self.directory.name) / 'native-checks.json'
+        code = main(['summary', '--prepare', str(self.out / 'prepare' / 'prepare.json'),
+                     '--selection', str(Path(self.directory.name) / 'absent' / 'selection.json'),
+                     '--brew', str(self.out / 'brew' / 'brew.json'), '--reports', str(reports),
+                     '--pins', str(pins), '--run-id', '4242', '--attempt', '1', '--out', str(out)])
+        self.assertEqual(code, 0)
+        document = validate_native_checks(json.loads(out.read_bytes()))
+        self.assertIsNone(document['brew'])
+        for entry in document['results']:
+            if entry['manager'] == 'brew':
+                self.assertEqual(entry['outcome'], 'failed')
+                self.assertTrue(entry['reason'].startswith('bottle-selection-unavailable:'), entry['reason'])
+            else:
+                self.assertEqual(entry['outcome'], 'passed')
+        prepared = json.loads(self.prepared)
+        context = dict(run_id=4242, attempt=1)
+        self.assertEqual(native_failures('scoop', self.reg, self.snap, document, prepared['candidates']['scoop'], context), [])
+        self.assertEqual(native_failures('winget', self.reg, self.snap, document, prepared['candidates']['winget'], context), [])
+        self.assertEqual(native_failures('brew', self.reg, self.snap, document, None, context, None),
+                         ['brew evidence missing'])
+
+    def test_selection_conflict_and_missing_assembly_reach_brew_results(self):
+        from distribution.native.prepare import main
+        pins = Path(self.directory.name) / 'pins.json'
+        pins.write_text(json.dumps({'statically_mapped': {}}))
+        selection = Path(self.directory.name) / 'selection.json'
+        out = Path(self.directory.name) / 'native-checks.json'
+        base = ['summary', '--prepare', str(self.out / 'prepare' / 'prepare.json'), '--selection', str(selection),
+                '--reports', str(Path(self.directory.name)), '--pins', str(pins), '--run-id', '4242',
+                '--attempt', '1', '--out', str(out)]
+        selection.write_text(json.dumps(dict(source='conflict', reason='bottle-conflict: incomplete release')))
+        self.assertEqual(main(base + ['--brew', str(self.out / 'brew' / 'brew.json')]), 0)
+        document = json.loads(out.read_bytes())
+        self.assertIsNone(document['brew'])
+        self.assertEqual({e['reason'] for e in document['results'] if e['manager'] == 'brew'},
+                         {'bottle-conflict: incomplete release'})
+        selection.write_text(json.dumps(dict(source='fresh', reason='fresh')))
+        self.assertEqual(main(base + ['--brew', str(Path(self.directory.name) / 'missing' / 'brew.json')]), 0)
+        reasons = {e['reason'] for e in json.loads(out.read_bytes())['results'] if e['manager'] == 'brew'}
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons.pop().startswith('bottle-assembly-failed:'))
+
+
 if __name__ == '__main__':
     unittest.main()

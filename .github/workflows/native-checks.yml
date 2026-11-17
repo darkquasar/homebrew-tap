@@ -10,6 +10,10 @@ on:
         description: release (record_ref from authority) or fixture (synthetic binaries on loopback)
         type: string
         required: true
+      app:
+        description: Registered app to check; names and paths come from its registration in both modes
+        type: string
+        required: true
       record_ref:
         description: Release mode only; the authority job's record_ref JSON
         type: string
@@ -41,6 +45,7 @@ jobs:
       windows_matrix: ${{ steps.matrix.outputs.windows }}
     env:
       MODE: ${{ inputs.mode }}
+      APP: ${{ inputs.app }}
       RECORD_REF: ${{ inputs.record_ref }}
       LIFECYCLE: ${{ inputs.lifecycle }}
       EXPECT_FAILURE: ${{ inputs.expect_failure }}
@@ -49,6 +54,7 @@ jobs:
         shell: bash
         run: |
           set -eu
+          [[ "$APP" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]]
           case "$MODE" in
             release) test -n "$RECORD_REF"; test "$LIFECYCLE" = false; test -z "$EXPECT_FAILURE" ;;
             fixture) test -z "$RECORD_REF"
@@ -86,12 +92,20 @@ jobs:
         shell: bash
         run: |
           set -eu
-          for version in 2.7.0 2.7.1; do
-            for target in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
-              suffix=''; case "$target" in windows-*) suffix=.exe ;; esac
-              CGO_ENABLED=0 GOOS="${target%-*}" GOARCH="${target#*-}" GOTOOLCHAIN=local \
-                go build -trimpath -ldflags "-s -w -buildid= -X main.name=patronus -X main.version=$version" \
-                -o "$RUNNER_TEMP/binaries/$version/patronus-$target$suffix" distribution/native/fixture/main.go
+          # Asset names and the reported name come from each fixture registration. A second-app
+          # run also builds Patronus, whose staged entries share the catalogues (coexistence).
+          apps="$APP"; if [ "$APP" != patronus ]; then apps="$APP patronus"; fi
+          for app in $apps; do
+            python3 -c 'import json,sys
+          c=json.load(open(sys.argv[1]))["configuration"]
+          [print(p, a, c["identifiers"]["command"]) for p, a in c["assets"].items()]' \
+              "distribution/tests/fixtures/$app-native-registration.json" > "$RUNNER_TEMP/assets-$app.txt"
+            for version in 2.7.0 2.7.1; do
+              while read -r target asset command; do
+                CGO_ENABLED=0 GOOS="${target%-*}" GOARCH="${target#*-}" GOTOOLCHAIN=local \
+                  go build -trimpath -ldflags "-s -w -buildid= -X main.name=$command -X main.version=$version" \
+                  -o "$RUNNER_TEMP/binaries/$version/$asset" distribution/native/fixture/main.go
+              done < "$RUNNER_TEMP/assets-$app.txt"
             done
           done
           go version
@@ -106,10 +120,15 @@ jobs:
             version) args+=(--assets-version 2.7.0 --expect-failure version) ;;
             arch) args+=(--expect-failure arch) ;;
           esac
-          python3 -B -m distribution.native.prepare fixture "${args[@]}" --out "$RUNNER_TEMP/native/current"
+          python3 -B -m distribution.native.prepare fixture --app "$APP" "${args[@]}" --out "$RUNNER_TEMP/native/current"
           if [ "$LIFECYCLE" = true ]; then
-            python3 -B -m distribution.native.prepare fixture --binaries "$RUNNER_TEMP/binaries" --version 2.7.0 \
-              --loopback http://127.0.0.1:18767 --out "$RUNNER_TEMP/native/older"
+            python3 -B -m distribution.native.prepare fixture --app "$APP" --binaries "$RUNNER_TEMP/binaries" \
+              --version 2.7.0 --loopback http://127.0.0.1:18767 --out "$RUNNER_TEMP/native/older"
+          fi
+          if [ "$APP" != patronus ]; then
+            # Coexisting entry only: staged into the catalogues, never served or installed.
+            python3 -B -m distribution.native.prepare fixture --app patronus --binaries "$RUNNER_TEMP/binaries" \
+              --version 2.7.1 --loopback http://127.0.0.1:18768 --out "$RUNNER_TEMP/native/coexist"
           fi
       - name: Load the recorded snapshot (release)
         if: inputs.mode == 'release'
@@ -117,10 +136,11 @@ jobs:
         shell: bash
         run: |
           set -eu
-          python3 - "$RECORD_REF" >> "$GITHUB_OUTPUT" <<'PY'
+          python3 - "$RECORD_REF" "$APP" >> "$GITHUB_OUTPUT" <<'PY'
           import json, re, sys
           ref = json.loads(sys.argv[1])
           assert re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', ref['app'])
+          assert ref['app'] == sys.argv[2], 'record_ref app differs from the dispatched app'
           assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', ref['version'])
           assert re.fullmatch(r'[0-9a-f]{40}', ref['records_commit'])
           print(f"app={ref['app']}\nversion={ref['version']}\ncommit={ref['records_commit']}")
@@ -232,6 +252,7 @@ jobs:
           NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
           LIFECYCLE: ${{ inputs.lifecycle }}
         run: |
+          if [ -f "$RUNNER_TEMP/native/coexist/prepare.json" ]; then export NATIVE_COEXIST="$RUNNER_TEMP/native/coexist"; fi
           older=''
           if [ "$LIFECYCLE" = true ]; then older="$RUNNER_TEMP/native/older"; fi
           distribution/native/brew_check.sh build "${{ matrix.platform }}" "$RUNNER_TEMP/build" \
@@ -337,6 +358,7 @@ jobs:
         env:
           NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
+          if [ -f "$RUNNER_TEMP/native/coexist/prepare.json" ]; then export NATIVE_COEXIST="$RUNNER_TEMP/native/coexist"; fi
           distribution/native/brew_check.sh check "${{ matrix.platform }}" "$RUNNER_TEMP/check" \
             "$RUNNER_TEMP/native/current" "$RUNNER_TEMP/brew/brew-current"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -497,16 +519,21 @@ jobs:
         with:
           name: ${{ inputs.label }}-inputs
           path: ${{ runner.temp }}/native
+      # Brew-only inputs: when select or assemble produced nothing, Brew fails and the
+      # Windows reports still reach native-checks.json.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
         with:
           name: ${{ inputs.label }}-selection
           path: ${{ runner.temp }}/selection
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.assemble.result == 'success'
+        continue-on-error: true
         with:
           name: ${{ inputs.label }}-brew-candidate
           path: ${{ runner.temp }}/brew
       - name: Collect platform reports
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ${{ inputs.label }}-*
@@ -519,20 +546,11 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -u
-          brew="$RUNNER_TEMP/brew/brew-current/brew.json"
-          failure=''
-          source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "$RUNNER_TEMP/selection/selection.json")"
-          case "$source" in
-            conflict|unavailable) failure="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reason"])' "$RUNNER_TEMP/selection/selection.json")" ;;
-          esac
-          if [ ! -f "$brew" ]; then
-            brew=''
-            failure="${failure:-bottle-assembly-failed: no complete verified bottle set (see build reports)}"
-          fi
-          args=(--prepare "$RUNNER_TEMP/native/current/prepare.json" --brew "$brew" --reports "$RUNNER_TEMP/reports"
+          mkdir -p "$RUNNER_TEMP/reports"
+          args=(--prepare "$RUNNER_TEMP/native/current/prepare.json" --selection "$RUNNER_TEMP/selection/selection.json"
+                --brew "$RUNNER_TEMP/brew/brew-current/brew.json" --reports "$RUNNER_TEMP/reports"
                 --pins distribution/native/pins.json --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
                 --out "$RUNNER_TEMP/native-checks/native-checks.json")
-          if [ -n "$failure" ]; then args+=(--brew-failure "$failure"); fi
           if [ -n "$EXPECT_FAILURE" ]; then args+=(--expect-failure "$EXPECT_FAILURE"); fi
           mkdir -p "$RUNNER_TEMP/native-checks"
           python3 -B -m distribution.native.prepare summary "${args[@]}" > "$RUNNER_TEMP/native-checks/summary.log"

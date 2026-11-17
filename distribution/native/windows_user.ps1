@@ -20,7 +20,12 @@ $scoopArch = @{ amd64 = '64bit'; arm64 = 'arm64' }[$Architecture]
 $wingetArch = @{ amd64 = 'x64'; arm64 = 'arm64' }[$Architecture]
 $appxArch = @{ amd64 = 'X64'; arm64 = 'Arm64' }[$Architecture]
 $platform = "windows-$Architecture"
-$app = 'patronus'
+. "$Work/windows_resolve.ps1"
+# Package identities and the command name come from prepare.py's names (validated registration).
+$names = (Get-Content "$Work/inputs/current/prepare.json" -Raw | ConvertFrom-Json).names
+$commandName = $names.command
+$scoopBucket = $names.scoop_bucket
+$scoopPackage = $names.scoop_package
 
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
@@ -96,49 +101,16 @@ if ($Phase -eq 'Register') {
 }
 
 if ($Phase -eq 'Fresh') {
-    # Resolve from persisted registry PATH in a new process, not a reused one.
+    # Resolve from persisted registry PATH in a new process, not a reused one. Without
+    # -ExpectedSha (removal probes) nothing is executed.
     Assert-NormalUser | Out-Null
     $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                 [Environment]::GetEnvironmentVariable('Path','User')
-    $result = [ordered]@{ found = $false; source = $null; target = $null; mechanism = $null; sha256 = $null; output = $null }
-    $command = @(Get-Command "$app.exe" -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($command) {
-        $result.found = $true
-        $result.source = $command.Source
-        if ($Manager -eq 'scoop') {
-            if ($command.Source -ne "$env:USERPROFILE\scoop\shims\$app.exe") {
-                throw "Unexpected Scoop executable resolution: $($command.Source)"
-            }
-            $shim = Get-Content "$env:USERPROFILE\scoop\shims\$app.shim" | Where-Object { $_ -match '^path\s*=' }
-            $result.target = ($shim -replace '^path\s*=\s*', '').Trim().Trim('"')
-            $result.mechanism = 'scoop-shim'
-        } else {
-            $links = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\$app.exe"
-            $packageRoot = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\"
-            $registration = Get-Content "$Work/inputs/current/registration.json" -Raw | ConvertFrom-Json
-            $identifier = $registration.configuration.identifiers.winget
-            if ($command.Source -eq $links) {
-                $result.mechanism = 'winget-link'
-                $item = Get-Item $links
-                $result.target = if ($item.Target) { @($item.Target)[0] } else { $links }
-            } elseif ($command.Source.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                $parts = $command.Source.Substring($packageRoot.Length).Split('\')
-                if (!($parts.Count -eq 2 -and $parts[0].StartsWith("$($identifier)_", [StringComparison]::OrdinalIgnoreCase) -and
-                      $parts[1] -eq "$app.exe")) { throw "Unexpected WinGet package path: $($command.Source)" }
-                $result.mechanism = 'winget-package-path'
-                $result.target = $command.Source
-            } else { throw "Unexpected WinGet executable resolution: $($command.Source)" }
-        }
-        $result.sha256 = (Get-FileHash $result.target -Algorithm SHA256).Hash.ToLowerInvariant()
-        # Only the host architecture's snapshot asset is executed, with a time bound: a foreign
-        # executable can block a non-interactive session on an error dialog.
-        if (!$ExpectedSha -or $result.sha256 -eq $ExpectedSha) {
-            $stdout = "$Work/fresh-$Manager-$Tag.out"
-            $process = Start-Process -FilePath $command.Source -ArgumentList '--version' -NoNewWindow -PassThru `
-                -RedirectStandardOutput $stdout -RedirectStandardError "$stdout.err"
-            if (!$process.WaitForExit(60000)) { $process.Kill(); throw "$app --version exceeded 60 seconds" }
-            $result.output = ((Get-Content $stdout, "$stdout.err" -ErrorAction SilentlyContinue) | Out-String).Trim()
-        }
+    $result = Resolve-NativeCommand -Manager $Manager -Command $commandName -Identifier $names.winget_identifier `
+        -ExpectedSha $ExpectedSha -OutputBase "$Work/fresh-$Manager-$Tag"
+    if ($result.found -and $result.mechanism -eq 'unexpected') {
+        Write-Json "$Work/fresh-$Manager-$Tag.json" $result
+        throw "Unexpected $Manager executable resolution: $($result.source)"
     }
     Write-Json "$Work/fresh-$Manager-$Tag.json" $result
     exit 0
@@ -156,23 +128,25 @@ function Get-Expected([string]$Kind) {
     $registration = Get-Content "$Work/inputs/$Kind/registration.json" -Raw | ConvertFrom-Json
     $snapshot = Get-Content "$Work/inputs/$Kind/snapshot.json" -Raw | ConvertFrom-Json
     $asset = $registration.configuration.assets.$platform
+    $kindNames = (Get-Content "$Work/inputs/$Kind/prepare.json" -Raw | ConvertFrom-Json).names
     return [pscustomobject]@{
         Version = $snapshot.payload.identity.version
         Sha256 = $snapshot.payload.identity.assets.$asset.sha256
         Asset = $asset
-        Identifier = $registration.configuration.identifiers.winget
-        WinGetPath = $registration.configuration.destinations.winget.path + '/' + $snapshot.payload.identity.version
+        Identifier = $kindNames.winget_identifier
+        WinGetPath = $kindNames.winget_path
+        ScoopPath = $kindNames.scoop_path
     }
 }
 
 # The resolved executable must be the host architecture's snapshot asset and report v<version>.
 function Assert-Resolved($Fresh, $Expected) {
-    if (!$Fresh.found) { throw "install-failed: $app does not resolve in a fresh process" }
+    if (!$Fresh.found) { throw "install-failed: $commandName does not resolve in a fresh process" }
     if ($Fresh.sha256 -ne $Expected.Sha256) {
         throw ("architecture-mismatch: resolved executable $($Fresh.target) sha256 $($Fresh.sha256) is not the " +
                "$platform snapshot asset $($Expected.Asset) $($Expected.Sha256)")
     }
-    if (-not ("$($Fresh.output)".Contains("v$($Expected.Version)"))) {
+    if (-not (Test-VersionToken "$($Fresh.output)" $Expected.Version)) {
         throw "version-mismatch: expected v$($Expected.Version), got: $($Fresh.output)"
     }
 }
@@ -213,15 +187,19 @@ function New-Bucket([string]$Kind) {
     $bucket = "$env:USERPROFILE\native-staging-bucket"
     New-Item -ItemType Directory $bucket | Out-Null
     Copy-Item "$Work/inputs/$Kind/staging/scoop/*" $bucket -Recurse
+    # Second-app runs: another app's staged manifest shares the bucket and must stay untouched.
+    if (Test-Path "$Work/inputs/coexist/prepare.json") {
+        Copy-Item "$Work/inputs/coexist/staging/scoop/*" $bucket -Recurse -Force
+    }
     foreach ($entry in @(
         @{ step='bucket-init'; arguments=@('-C',$bucket,'init','--initial-branch=main') },
         @{ step='bucket-add'; arguments=@('-C',$bucket,'add','bucket') },
         @{ step="bucket-commit-$Kind"; arguments=@('-C',$bucket,'-c','user.name=Native Fixture',
             '-c','user.email=fixture@example.invalid','commit','-m',"Staging bucket ($Kind)") }
     )) { $null = Invoke-Native -Step $entry.step -File 'git.exe' -Arguments $entry.arguments }
-    $null = Scoop 'scoop-bucket-register' @('bucket','add','darkquasar',([uri]$bucket).AbsoluteUri)
-    $localManifest = "$Work/inputs/$Kind/staging/scoop/bucket/$app.json"
-    $registered = "$env:SCOOP/buckets/darkquasar/bucket/$app.json"
+    $null = Scoop 'scoop-bucket-register' @('bucket','add',$scoopBucket,([uri]$bucket).AbsoluteUri)
+    $localManifest = "$Work/inputs/$Kind/staging/scoop/$($names.scoop_path)"
+    $registered = "$env:SCOOP/buckets/$scoopBucket/$($names.scoop_path)"
     if (!(Test-Path $registered) -or (Get-FileHash $registered).Hash -ne (Get-FileHash $localManifest).Hash) {
         throw "validation-failed: registered bucket manifest differs from staged bytes"
     }
@@ -258,6 +236,22 @@ function Save-Report($Report, $ErrorRecord) {
     Write-Json "$Work/report-check-$($Report.manager)-$platform.json" $Report
 }
 
+function Assert-Coexistence {
+    if (!(Test-Path "$Work/inputs/coexist/prepare.json")) { return }
+    $other = (Get-Content "$Work/inputs/coexist/prepare.json" -Raw | ConvertFrom-Json).names
+    $registered = "$env:SCOOP/buckets/$scoopBucket/$($other.scoop_path)"
+    $staged = "$Work/inputs/coexist/staging/scoop/$($other.scoop_path)"
+    $record = [ordered]@{ manifest = $other.scoop_path; registered = $null
+        staged = (Get-FileHash $staged -Algorithm SHA256).Hash.ToLowerInvariant()
+        installed = (Test-Path "$env:SCOOP/apps/$($other.scoop_package)")
+        shim = (Test-Path "$env:SCOOP/shims/$($other.command).exe") }
+    if (Test-Path $registered) { $record.registered = (Get-FileHash $registered -Algorithm SHA256).Hash.ToLowerInvariant() }
+    Write-Json "$Work/coexist-scoop.json" $record
+    if ($record.registered -ne $record.staged -or $record.installed -or $record.shim) {
+        throw "coexistence-failed: $($other.app) entry changed or was installed during the $($names.app) check"
+    }
+}
+
 function Test-Scoop {
     $report = New-Report 'scoop'
     $expected = Get-Expected 'current'
@@ -266,34 +260,35 @@ function Test-Scoop {
             $prepare = Get-Content "$Work/inputs/current/prepare.json" -Raw | ConvertFrom-Json
             if (!$prepare.validation.scoop.passed) { throw 'validation-failed: Scoop schema validation did not pass' }
             $null = New-Bucket 'current'
-            $info = Scoop 'scoop-info' @('info',"darkquasar/$app")
-            if ($info.Text -notmatch $app -or $info.Text -notmatch 'darkquasar') { throw 'validation-failed: Scoop discovery failed' }
+            $info = Scoop 'scoop-info' @('info',"$scoopBucket/$scoopPackage")
+            if ($info.Text -notmatch [regex]::Escape($scoopPackage) -or $info.Text -notmatch [regex]::Escape($scoopBucket)) { throw 'validation-failed: Scoop discovery failed' }
             # This pinned Scoop prints an error then returns exit 0 for unsupported
             # architecture. Require its exact denial and absence of installed files.
-            $denial = Scoop 'scoop-x86' @('install',"darkquasar/$app",'--arch','32bit','--no-update-scoop') -AllowFailure
+            $denial = Scoop 'scoop-x86' @('install',"$scoopBucket/$scoopPackage",'--arch','32bit','--no-update-scoop') -AllowFailure
             if ($denial.Text -notmatch "doesn't support current architecture" -or
-                (Test-Path "$env:SCOOP/apps/$app") -or (Test-Path "$env:SCOOP/shims/$app.exe")) {
+                (Test-Path "$env:SCOOP/apps/$scoopPackage") -or (Test-Path "$env:SCOOP/shims/$commandName.exe")) {
                 throw 'validation-failed: x86 installation was not denied'
             }
         }
         Invoke-Step $report 'install' {
             $script:installedScoop = $true
-            $null = Scoop 'scoop-install' @('install',"darkquasar/$app",'--arch',$scoopArch,'--no-update-scoop')
+            $null = Scoop 'scoop-install' @('install',"$scoopBucket/$scoopPackage",'--arch',$scoopArch,'--no-update-scoop')
         }
         Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'scoop' 'installed' $expected.Sha256) $expected }
         Invoke-Step $report 'uninstall' {
-            $null = Scoop 'scoop-uninstall' @('uninstall',$app)
+            $null = Scoop 'scoop-uninstall' @('uninstall',$scoopPackage)
             $script:installedScoop = $false
-            if ((Test-Path "$env:SCOOP/shims/$app.exe") -or (Get-Fresh 'scoop' 'removed').found) {
-                throw "uninstall-failed: $app still resolves after scoop uninstall"
+            if ((Test-Path "$env:SCOOP/shims/$commandName.exe") -or (Get-Fresh 'scoop' 'removed').found) {
+                throw "uninstall-failed: $commandName still resolves after scoop uninstall"
             }
+            Assert-Coexistence
         }
         Save-Report $report $null
     } catch {
         Save-Report $report $_
         Write-Host "Scoop check failed: $($report.reason)"
     } finally {
-        if ($script:installedScoop) { $null = Scoop 'scoop-cleanup-uninstall' @('uninstall',$app) -AllowFailure }
+        if ($script:installedScoop) { $null = Scoop 'scoop-cleanup-uninstall' @('uninstall',$scoopPackage) -AllowFailure }
     }
 }
 
@@ -315,7 +310,7 @@ function Test-WinGet([string]$WinGet) {
                 '--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
             if ($denial.Exit -eq 0 -or $denial.Text -notmatch 'No applicable installer' -or
                 (Test-Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\$($expected.Identifier)_*") -or
-                (Test-Path "$env:LOCALAPPDATA\Microsoft\WinGet\Links\$app.exe") -or
+                (Test-Path "$env:LOCALAPPDATA\Microsoft\WinGet\Links\$commandName.exe") -or
                 [Environment]::GetEnvironmentVariable('Path','User') -ne $beforePath) {
                 throw 'validation-failed: WinGet x86 denial failed'
             }
@@ -335,7 +330,7 @@ function Test-WinGet([string]$WinGet) {
                 'uninstall','--manifest',"$Work/inputs/current/staging/winget/$($expected.WinGetPath)",
                 '--accept-source-agreements','--disable-interactivity')
             $script:installedWinGet = $false
-            if ((Get-Fresh 'winget' 'removed').found) { throw "uninstall-failed: $app still resolves after winget uninstall" }
+            if ((Get-Fresh 'winget' 'removed').found) { throw "uninstall-failed: $commandName still resolves after winget uninstall" }
         }
         Save-Report $report $null
     } catch {
@@ -430,13 +425,13 @@ function Invoke-Lifecycle([string]$WinGet) {
     # Scoop: install the older bucket, advance the local bucket repository, update.
     $stages = New-Object Collections.ArrayList
     $bucket = New-Bucket 'older'
-    $null = Scoop 'life-scoop-install' @('install',"darkquasar/$app",'--arch',$scoopArch,'--no-update-scoop')
+    $null = Scoop 'life-scoop-install' @('install',"$scoopBucket/$scoopPackage",'--arch',$scoopArch,'--no-update-scoop')
     $fresh = Get-Fresh 'scoop' 'life-installed' $older.Sha256; Assert-Resolved $fresh $older; Test-Preservation 'scoop-installed'
-    Add-Stage $stages 'installed' "scoop install darkquasar/$app" $fresh
+    Add-Stage $stages 'installed' "scoop install $scoopBucket/$scoopPackage" $fresh
     # Write fresh bytes (new timestamp): Copy-Item keeps the source time, and an equal size and
     # time let Git's index treat the newer manifest as unchanged.
-    [IO.File]::WriteAllBytes("$bucket\bucket\$app.json",
-        [IO.File]::ReadAllBytes("$Work\inputs\current\staging\scoop\bucket\$app.json"))
+    [IO.File]::WriteAllBytes((Join-Path $bucket $names.scoop_path),
+        [IO.File]::ReadAllBytes((Join-Path "$Work\inputs\current\staging\scoop" $names.scoop_path)))
     $null = Invoke-Native -Step 'bucket-advance' -File 'git.exe' -Arguments @('-C',$bucket,'-c','user.name=Native Fixture',
         '-c','user.email=fixture@example.invalid','commit','-am','Advance staging bucket to the newer candidate')
     # Keep the pinned Scoop core if `scoop update <app>` decides Scoop is outdated.
@@ -445,15 +440,15 @@ function Invoke-Lifecycle([string]$WinGet) {
     # the mutable upstream Main bucket), so refresh the registered bucket exactly as its bucket
     # sync does, with `git pull`, then run the documented `scoop update <app>`.
     $null = Invoke-Native -Step 'life-scoop-bucket-pull' -File 'git.exe' -Arguments @(
-        '-C',"$env:SCOOP\buckets\darkquasar",'pull','-q')
-    $null = Scoop 'life-scoop-update-app' @('update',$app)
+        '-C',"$env:SCOOP\buckets\$scoopBucket",'pull','-q')
+    $null = Scoop 'life-scoop-update-app' @('update',$scoopPackage)
     $fresh = Get-Fresh 'scoop' 'life-upgraded' $current.Sha256; Assert-Resolved $fresh $current; Test-Preservation 'scoop-upgraded'
-    Add-Stage $stages 'upgraded' "git pull (bucket); scoop update $app" $fresh
-    $null = Scoop 'life-scoop-uninstall' @('uninstall',$app)
+    Add-Stage $stages 'upgraded' "git pull (bucket); scoop update $scoopPackage" $fresh
+    $null = Scoop 'life-scoop-uninstall' @('uninstall',$scoopPackage)
     $fresh = Get-Fresh 'scoop' 'life-removed'
-    if ($fresh.found -or (Test-Path "$env:SCOOP/shims/$app.exe")) { throw 'Scoop uninstall left the command' }
+    if ($fresh.found -or (Test-Path "$env:SCOOP/shims/$commandName.exe")) { throw 'Scoop uninstall left the command' }
     Test-Preservation 'scoop-removed'
-    Add-Stage $stages 'removed' "scoop uninstall $app" $fresh
+    Add-Stage $stages 'removed' "scoop uninstall $scoopPackage" $fresh
     Write-Json "$Work/lifecycle-scoop.json" ([ordered]@{ manager = 'scoop'; platform = $platform; outcome = 'passed'
         package_shape = 'Scoop portable executable from a bucket manifest (shim), local Git bucket, pinned Scoop core held'
         versions = @($older.Version, $current.Version); stages = $stages })

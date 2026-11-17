@@ -11,14 +11,44 @@
 # formula's full name equals the published one. Run from the tap checkout root.
 set -uo pipefail
 
-TAP=darkquasar/tap
-FORMULA=patronus
+# Tap, formula, formula path and command come from prepare.json "names" (load_names).
+TAP='' FORMULA='' FORMULA_PATH='' COMMAND=''
 NATIVE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY=("${NATIVE_PYTHON:-python3}" -B)  # setup-python, not a Homebrew python3 earlier on PATH
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
 
 die() { echo "error: $*" >&2; exit 1; }
 field() { "${PY[@]}" -c 'import json,sys; v=json.load(open(sys.argv[1])); [v:=v[k] for k in sys.argv[2:]]; print("" if v is None else v)' "$@"; }
+
+load_names() {  # load_names PREPARE: names computed by prepare.py from the validated registration
+  TAP="$(field "$1/prepare.json" names tap)"
+  FORMULA="$(field "$1/prepare.json" names formula)"
+  FORMULA_PATH="$(field "$1/prepare.json" names formula_path)"
+  COMMAND="$(field "$1/prepare.json" names command)"
+  [ -n "$TAP" ] && [ -n "$FORMULA" ] && [ -n "$FORMULA_PATH" ] && [ -n "$COMMAND" ] || die 'names missing from prepare.json'
+}
+
+# NATIVE_COEXIST names another app's prepare tree whose staging formula shares the tap
+# (second-app runs): it must stay byte-identical and never be installed.
+coexist_seed() {  # coexist_seed TAP_REPO OUT
+  [ -n "${NATIVE_COEXIST:-}" ] || return 0
+  local path
+  path="$(field "$NATIVE_COEXIST/prepare.json" names formula_path)"
+  cp "$NATIVE_COEXIST/staging/brew/$path" "$1/$path"
+  file_sha "$1/$path" > "$2/coexist-before.txt"
+}
+
+coexist_verify() {  # coexist_verify TAP_REPO OUT ; prints a reason on failure
+  [ -n "${NATIVE_COEXIST:-}" ] || return 0
+  local path other
+  path="$(field "$NATIVE_COEXIST/prepare.json" names formula_path)"
+  other="$(field "$NATIVE_COEXIST/prepare.json" names command)"
+  file_sha "$1/$path" > "$2/coexist-after.txt"
+  { echo "coexisting formula: $path"; echo "before: $(cat "$2/coexist-before.txt")"; echo "after: $(cat "$2/coexist-after.txt")"
+    echo "other command on PATH: $(command -v "$other" || echo none)"; } > "$2/coexist.txt"
+  cmp -s "$2/coexist-before.txt" "$2/coexist-after.txt" || { echo "coexistence-failed: $path changed"; return 1; }
+  ! command -v "$other" > /dev/null || { echo "coexistence-failed: $other was installed"; return 1; }
+}
 
 host_platform() {
   local system cpu
@@ -84,10 +114,11 @@ serve() {  # serve DIR LOOPBACK_URL LOG
 
 staging_tap() {
   local repo
-  repo="$(brew --repository)/Library/Taps/darkquasar/homebrew-tap"
+  repo="$(brew --repository)/Library/Taps/${TAP%%/*}/homebrew-${TAP#*/}"
   if [ ! -d "$repo" ]; then
     brew tap-new --no-git "$TAP" > /dev/null || die 'brew tap-new failed'
     rm -rf "$repo/.github"
+    coexist_seed "$repo" "${CHECK_OUT:-$RUNNER_TEMP}" >&2
   fi
   echo "$repo"
 }
@@ -133,8 +164,8 @@ file_sha() { "${PY[@]}" -c 'import hashlib,os,sys; print(hashlib.sha256(open(os.
 resolved_check() {  # resolved_check PREPARE PLATFORM VERSION LOG
   local path sha expected output
   hash -r
-  path="$(command -v "$FORMULA")" || { echo "install-failed: $FORMULA not on PATH"; return 1; }
-  case "$path" in "$(brew --prefix)"/bin/*) ;; *) echo "install-failed: $FORMULA resolves to $path, not the Homebrew prefix"; return 1 ;; esac
+  path="$(command -v "$COMMAND")" || { echo "install-failed: $COMMAND not on PATH"; return 1; }
+  case "$path" in "$(brew --prefix)"/bin/*) ;; *) echo "install-failed: $COMMAND resolves to $path, not the Homebrew prefix"; return 1 ;; esac
   sha="$(file_sha "$path")"
   expected="$(expected_sha "$1" "$2")"
   { echo "path: $path"; echo "realpath: $("${PY[@]}" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path")"
@@ -146,10 +177,9 @@ resolved_check() {  # resolved_check PREPARE PLATFORM VERSION LOG
   output="$("${PY[@]}" -c 'import subprocess,sys
 r=subprocess.run([sys.argv[1],"--version"],capture_output=True,text=True,timeout=60); print((r.stdout+r.stderr).strip())' "$path" 2>&1)"
   echo "output: $output" >> "$4"
-  case "$output" in
-    *"v$3"*) ;;
-    *) echo "version-mismatch: expected v$3, got: $output"; return 1 ;;
-  esac
+  # Exact v<version> token: v2.7.10, v2.7.1-rc1 or v2.7.0 do not satisfy 2.7.1.
+  "${PY[@]}" -m distribution.native.prepare version-check --version "$3" --output "$output" > "$4.verdict" \
+    || { cat "$4.verdict"; return 1; }
 }
 
 build_one() {  # build_one PLATFORM OUT PREPARE ; prints a failure reason on stdout
@@ -164,7 +194,7 @@ print(canonical_root_url(r["configuration"], s["payload"]["identity"]))' "$prepa
   SERVER=
   if [ -n "$loopback" ]; then serve "$prepare/assets" "$loopback" "$out/$version/assets-http.log" >&2; fi
   repo="$(staging_tap)"
-  cp "$prepare/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
+  cp "$prepare/staging/brew/$FORMULA_PATH" "$repo/$FORMULA_PATH"
   trust >&2
   brew install --build-bottle "$TAP/$FORMULA" > "$out/$version/build-install.log" 2>&1 \
     || { echo "bottle-build-failed: brew install --build-bottle exited non-zero (see build-install.log)"; return 1; }
@@ -210,6 +240,8 @@ build() {
   local platform="$1" out="$2" prepare="$3" older="${4:-}" reason expect outcome=passed
   require_host "$platform"
   mkdir -p "$out"
+  load_names "$prepare"
+  CHECK_OUT="$out"
   expect="$(field "$prepare/prepare.json" expect_failure)"
   if [ -n "$older" ]; then
     reason="$(build_one "$platform" "$out" "$older")" || die "older lifecycle bottle failed: $reason"
@@ -228,6 +260,8 @@ check() {
   local validate=not-run install=not-run versioned=not-run uninstall=not-run
   require_host "$platform"
   mkdir -p "$out"
+  load_names "$prepare"
+  CHECK_OUT="$out"
   version="$(field "$prepare/prepare.json" version)"
   expect="$(field "$prepare/prepare.json" expect_failure)"
   tag="$("${PY[@]}" -c 'import json,sys
@@ -235,7 +269,7 @@ from distribution.bottles import bottle_tag_platform as t
 d=json.load(open(sys.argv[1])); print(next(k for k in d["bottle_set"]["tags"] if "-".join(t(k))==sys.argv[2]))' "$brew_dir/brew.json" "$platform")"
   serve "$brew_dir/bottles" "$(field "$brew_dir/brew.json" loopback)" "$out/bottles-http.log"
   repo="$(staging_tap)"
-  cp "$brew_dir/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
+  cp "$brew_dir/staging/brew/$FORMULA_PATH" "$repo/$FORMULA_PATH"
   trust
   while :; do
     if "${PY[@]}" -m distribution.native.prepare validate-bottled --prepare "$prepare" --brew "$brew_dir" \
@@ -254,9 +288,10 @@ d=json.load(open(sys.argv[1])); print(next(k for k in d["bottle_set"]["tags"] if
     else
       versioned=failed; reason="${reason:-version-failed: brew test failed (see test.log)}"; break
     fi
-    if brew uninstall "$TAP/$FORMULA" > "$out/uninstall.log" 2>&1 && { hash -r; ! command -v "$FORMULA" > /dev/null; }; then
+    if brew uninstall "$TAP/$FORMULA" > "$out/uninstall.log" 2>&1 && { hash -r; ! command -v "$COMMAND" > /dev/null; }; then
       uninstall=passed; outcome=passed
-    else uninstall=failed; reason="uninstall-failed: $FORMULA still resolves after brew uninstall"; fi
+    else uninstall=failed; reason="uninstall-failed: $COMMAND still resolves after brew uninstall"; break; fi
+    if ! reason="$(coexist_verify "$repo" "$out")"; then outcome=failed; uninstall=failed; fi
     break
   done
   report check "$platform" "$outcome" "$reason" \
@@ -271,6 +306,8 @@ lifecycle() {
   local old_version new_version tag repo project stages="$2/stages.jsonl" reason
   require_host "$platform"
   mkdir -p "$out/served"
+  load_names "$prepare"
+  CHECK_OUT="$out"
   old_version="$(field "$older/prepare.json" version)"
   new_version="$(field "$prepare/prepare.json" version)"
   [ "$(field "$older_brew/brew.json" loopback)" = "$(field "$brew_dir/brew.json" loopback)" ] || die 'bottle loopback roots differ'
@@ -296,7 +333,7 @@ print(json.dumps(dict(stage=name,command=command,exit=int(code),resolution=v,pre
   "${PY[@]}" -m distribution.native.prepare preservation seed --source distribution/tests/native/preservation \
     --project "$project" --home "$HOME" --out "$out/preservation-seeded.json" > /dev/null || die 'seeding sentinels failed'
   stage seeded 'seed preservation sentinels' 0 '' "$out/preservation-seeded.json"
-  cp "$older_brew/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
+  cp "$older_brew/staging/brew/$FORMULA_PATH" "$repo/$FORMULA_PATH"
   trust
   brew install "$TAP/$FORMULA" > "$out/install.log" 2>&1 || die 'older bottled install failed'
   poured "$old_version" "$tag" "$out/install.log" || die "no pour of $old_version"
@@ -304,7 +341,7 @@ print(json.dumps(dict(stage=name,command=command,exit=int(code),resolution=v,pre
   preserved installed || die 'sentinels changed after install'
   stage installed "brew install $TAP/$FORMULA" 0 "$out/version-installed.txt" "$out/preservation-installed.json"
   # Advance the staging catalogue: the no-git tap now carries the newer canonical formula's staging copy.
-  cp "$brew_dir/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
+  cp "$brew_dir/staging/brew/$FORMULA_PATH" "$repo/$FORMULA_PATH"
   brew upgrade "$TAP/$FORMULA" > "$out/upgrade.log" 2>&1 || die 'brew upgrade failed'
   poured "$new_version" "$tag" "$out/upgrade.log" || die "upgrade did not pour $new_version"
   ! grep -qi 'from source' "$out/upgrade.log" || die 'upgrade built from source'
@@ -313,7 +350,7 @@ print(json.dumps(dict(stage=name,command=command,exit=int(code),resolution=v,pre
   stage upgraded "brew upgrade $TAP/$FORMULA" 0 "$out/version-upgraded.txt" "$out/preservation-upgraded.json"
   brew uninstall "$TAP/$FORMULA" > "$out/uninstall.log" 2>&1 || die 'brew uninstall failed'
   hash -r
-  ! command -v "$FORMULA" > /dev/null || die "$FORMULA still resolves after uninstall"
+  ! command -v "$COMMAND" > /dev/null || die "$COMMAND still resolves after uninstall"
   preserved removed || die 'sentinels changed after uninstall'
   stage removed "brew uninstall $TAP/$FORMULA" 0 '' "$out/preservation-removed.json"
   "${PY[@]}" -c 'import json,sys

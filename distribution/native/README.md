@@ -36,7 +36,13 @@ environment and no secrets. Only the existing `distribute.yml` publisher writes.
   `fixture/main.go` once for all six platforms and versions 2.7.0 and 2.7.1,
   freezes a fixture snapshot, and serves the assets on loopback. Label
   `native-lifecycle` adds the lifecycle jobs; label `native-negative` adds the two
-  AC-17 negatives (`expect_failure: arch` and `version`).
+  AC-17 negatives (`expect_failure: arch` and `version`); label `native-second-app`
+  runs the same checks for the second fixture app (Lumen) while Patronus's staged
+  entries share the tap and bucket and must stay untouched.
+
+Both modes take an `app` input. Every formula, package, path and command name comes
+from that app's validated registration through `prepare.py`'s `names` (package
+identity and command are separate fields), never from a hard-coded app.
 
 ## Files
 
@@ -50,6 +56,10 @@ environment and no secrets. Only the existing `distribute.yml` publisher writes.
 - `brew_check.sh`: Homebrew host setup (the image's Homebrew, or the pinned
   installer on Linux), bottle builds from a `--no-git` staging tap named
   `darkquasar/tap`, the pour check and the macOS lifecycle.
+- `windows_resolve.ps1`: command resolution and the exact `v<version>` token check.
+  A program runs only when its SHA-256 equals the digest the caller expects; removal
+  probes are resolve-only. Regression: `test_windows_resolve.ps1` (CI job
+  `windows-harness-regression`).
 - `windows_check.ps1` and `windows_user.ps1`: Scoop and WinGet as a separate
   normal user (no administrator or symlink privilege, Developer Mode off,
   RemoteSigned), for the host architecture.
@@ -60,7 +70,8 @@ environment and no secrets. Only the existing `distribute.yml` publisher writes.
 
 A failing check reports one reason prefix: `architecture-mismatch:` (the resolved
 executable is not the host architecture's snapshot asset), `version-mismatch:`
-(`--version` lacks `v<version>`), or `validation-failed:`, `install-failed:`,
+(`--version` does not report `v<version>` as a whole token, so `v2.7.10`,
+`v2.7.1-rc1` and `v2.7.0` all fail for 2.7.1), or `validation-failed:`, `install-failed:`,
 `uninstall-failed:`, `bottle-build-failed:`, `harness-failed:`. A missing report
 fails its platform. A platform in `statically_mapped` without a report is
 recorded `statically-mapped`, never as tested.

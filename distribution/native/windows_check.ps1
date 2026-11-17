@@ -19,7 +19,7 @@ New-Item -ItemType Directory $Out | Out-Null
 Start-Transcript -Path "$Out/setup.log" | Out-Null
 $servers = @()
 $taskRegistered = $false
-$taskName = 'patronus-native'
+$taskName = 'native-check'
 $timer = [Diagnostics.Stopwatch]::StartNew()
 $phaseTimes = [ordered]@{}
 $osArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
@@ -88,6 +88,7 @@ try {
     & powershell.exe -NoProfile -Command 'Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
     if ($LASTEXITCODE -ne 0) { throw 'Could not set the normal Windows PowerShell execution policy.' }
     Copy-Item "$PSScriptRoot/windows_user.ps1" "$Out/user.ps1"
+    Copy-Item "$PSScriptRoot/windows_resolve.ps1" "$Out/windows_resolve.ps1"
     & powershell.exe -NoProfile -File "$Out/user.ps1" -Work $Out -Phase Register -Architecture $architecture
     if ($LASTEXITCODE -ne 0) { throw 'Administrator WinGet registration failed.' }
     $winget = (Get-Content "$Out/admin-winget.txt" -Raw).Trim()
@@ -110,7 +111,7 @@ try {
         $loopback = (Get-Content "$Out/inputs/$kind/prepare.json" -Raw | ConvertFrom-Json).loopback
         if ($loopback) { $servers += Start-Loopback "$Out/inputs/$kind/assets" $loopback $kind }
     }
-    $name = 'patronusNative'
+    $name = 'nativeCheckUser'
     if (Get-LocalUser $name -ErrorAction SilentlyContinue) { throw 'Test user already exists.' }
     $password = [guid]::NewGuid().ToString('N') + '!a9Z'
     $secure = ConvertTo-SecureString $password -AsPlainText -Force

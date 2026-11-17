@@ -104,6 +104,26 @@ def fixture_snapshot(registration, version, assets):
     return validate_snapshot(registration, snapshot)
 
 
+def native_names(registration, version):
+    """Manager-facing names for one registered app: package identity and command stay separate."""
+    from distribution.contracts import validate_registration
+    c = validate_registration(registration)['configuration']
+    owner, repository = c['destinations']['brew']['repository'].split('/')
+    require(repository.startswith('homebrew-'), 'tap repository must be named homebrew-<tap>')
+    return dict(app=c['app'], tap=owner + '/' + repository[len('homebrew-'):], formula=c['identifiers']['brew'],
+                formula_path=c['destinations']['brew']['path'], scoop_bucket=c['owner_login'],
+                scoop_package=c['identifiers']['scoop'], scoop_path=c['destinations']['scoop']['path'],
+                winget_identifier=c['identifiers']['winget'],
+                winget_path=c['destinations']['winget']['path'] + '/' + version,
+                command=c['identifiers']['command'], assets=dict(c['assets']))
+
+
+def version_matches(output, version):
+    """`v<version>` as a whole token: v2.7.1 matches, v2.7.10, v2.7.1-rc1 and v2.7.0 do not."""
+    return type(output) is str and re.search(
+        r'(?<![0-9A-Za-z.+-])v' + re.escape(version) + r'(?![0-9A-Za-z.+-])', output) is not None
+
+
 def check_record(registration, snapshot, record_ref):
     """The release-mode locator must name exactly this snapshot and configuration."""
     c, identity = inputs(registration, snapshot)
@@ -158,7 +178,7 @@ def stage_candidates(out, registration, snapshot, *, loopback=None, assets=None,
                   snapshot_digest=snapshot['snapshot_digest'],
                   configuration_digest=registration['configuration_digest'],
                   loopback=loopback, expect_failure=expect_failure, candidates=candidates,
-                  validation=validation, files=files)
+                  validation=validation, names=native_names(registration, identity['version']), files=files)
     (out / 'prepare.json').write_bytes(encode(result))
     return result
 
@@ -442,6 +462,7 @@ def main(argv=None):
     command.add_argument('--run-id', required=True, type=int)
     command.add_argument('--attempt', required=True, type=int)
     command.add_argument('--brew-failure')
+    command.add_argument('--selection', help='selection.json from the select job; missing means Brew failed')
     command.add_argument('--expect-failure', choices=NEGATIVES)
     command = sub.add_parser('validate-bottled', help='native syntax/style check of the canonical bottled formula')
     for name in ['prepare', 'brew', 'out']:
@@ -450,6 +471,9 @@ def main(argv=None):
     for name in ['stage', 'manager', 'platform', 'outcome', 'runner', 'manager-version', 'steps', 'inputs', 'out']:
         command.add_argument('--' + name, required=True)
     command.add_argument('--reason', default='')
+    command = sub.add_parser('version-check', help='exact v<version> token in a command output')
+    command.add_argument('--version', required=True)
+    command.add_argument('--output', required=True)
     command = sub.add_parser('preservation', help='seed or compare the T5 preservation sentinels')
     command.add_argument('action', choices=['seed', 'check'])
     for name in ['source', 'project', 'home', 'out']:
@@ -495,6 +519,12 @@ def main(argv=None):
         Path(args.out).write_bytes(encode(document))
         print(encode(document).decode())
         return 0
+    elif args.command == 'version-check':
+        if version_matches(args.output, args.version):
+            print(f'version-ok: v{args.version}')
+            return 0
+        print(f'version-mismatch: expected v{args.version}, got: {args.output.strip()}')
+        return 1
     elif args.command == 'preservation':
         if args.action == 'seed':
             inventory = seed_preservation(args.source, args.project, args.home)
@@ -531,9 +561,28 @@ def main(argv=None):
             except Exception as error:
                 print(f'ignored unreadable report {path}: {error}')
         static = _json(args.pins)['statically_mapped']
-        document = summarize(read_regular(prepare), read_regular(Path(args.brew)) if args.brew else None, reports,
-                             run_id=args.run_id, attempt=args.attempt, static=static,
-                             brew_failure=args.brew_failure)
+        brew, failure, usable = None, args.brew_failure, True
+        if args.selection is not None:
+            # A missing or unreadable selection fails Brew only; Windows reports still count.
+            try:
+                selection = _json(args.selection)
+                require(selection.get('source') in {'fresh', 'published', 'conflict', 'unavailable'},
+                        'unknown selection source')
+            except Exception as error:
+                failure, usable = failure or f'bottle-selection-unavailable: no readable selection.json ({error})', False
+            else:
+                if selection['source'] in {'conflict', 'unavailable'}:
+                    failure, usable = failure or selection['reason'], False
+        if usable:
+            try:
+                brew = read_regular(Path(args.brew)) if args.brew else None
+            except Exception as error:
+                brew = None
+                failure = failure or f'bottle-assembly-failed: no complete verified bottle set ({error})'
+            if brew is None:
+                failure = failure or 'bottle-assembly-failed: no complete verified bottle set'
+        document = summarize(read_regular(prepare), brew, reports, run_id=args.run_id, attempt=args.attempt,
+                             static=static, brew_failure=failure)
         Path(args.out).write_bytes(encode(document))
         print(encode(document).decode())
         if args.expect_failure:
