@@ -308,12 +308,9 @@ class VerifyBottle(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(BottleInvalid):
                 verify_bottle(data, reg, snap, 'arm64_sequoia')
 
-    def test_wrong_platform_tag_and_unknown_tag_are_invalid(self):
+    def test_unknown_tag_forms_are_invalid(self):
         from distribution.bottles import BottleInvalid, verify_bottle
         reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
-        with self.assertRaises(BottleInvalid) as caught:
-            verify_bottle(bottle(platform='darwin-amd64'), reg, snap, 'arm64_sequoia')
-        self.assertIn('darwin-amd64', str(caught.exception))
         for tag in ['x86_64_sequoia', 'arm64_freebsd']:
             with self.subTest(tag=tag), self.assertRaises(BottleInvalid):
                 verify_bottle(bottle(), reg, snap, tag)
@@ -624,3 +621,118 @@ class ReleaseAdapter(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReviewCorrections(unittest.TestCase):
+    """Codex T6 milestone review T6R-01..03 and the plan's digest-conflict contract."""
+    def sparse_archive(self, sparse_name):
+        entries = members(binary=executable('patronus', 'darwin-arm64'))
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w', format=tarfile.PAX_FORMAT) as tar:
+            for name, kind, data in entries:
+                info = tarfile.TarInfo(name.rstrip('/') if kind == 'dir' else name)
+                info.mtime = 0
+                if kind == 'dir':
+                    info.type, info.mode = tarfile.DIRTYPE, 0o755
+                    tar.addfile(info)
+                    continue
+                info.size, info.mode = len(data), 0o555
+                if name == sparse_name:
+                    info.pax_headers = {'GNU.sparse.map': f'65535,{len(data)}', 'GNU.sparse.size': '65536'}
+                tar.addfile(info, io.BytesIO(data))
+        return gzip.compress(stream.getvalue(), mtime=0)
+
+    def test_sparse_members_are_rejected_before_their_logical_size_is_read(self):
+        from unittest.mock import patch
+        from distribution import bottles
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        for name in ['patronus/2.7.1/sbom.spdx.json', 'patronus/2.7.1/bin/patronus']:
+            data = self.sparse_archive(name)
+            self.assertLess(len(data), 8 * 1024)
+            with self.subTest(member=name), patch.object(bottles, 'MAX_UNCOMPRESSED', 32 * 1024):
+                with self.assertRaises(bottles.BottleInvalid) as caught:
+                    bottles.verify_bottle(data, reg, snap, 'arm64_sequoia')
+                self.assertIn('sparse', str(caught.exception))
+                self.assertIn(name, str(caught.exception))
+
+    def test_executable_of_another_platform_is_an_identity_conflict(self):
+        import tempfile
+        from distribution.bottles import BottleConflict, verify_bottle
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        with self.assertRaises(BottleConflict) as caught:
+            verify_bottle(bottle(platform='darwin-amd64'), reg, snap, 'arm64_sequoia')
+        self.assertIn('darwin-amd64', str(caught.exception))
+        with tempfile.TemporaryDirectory() as directory:
+            code, document = VerifyBottleCli.run_cli(self, directory, bottle(platform='darwin-amd64'))
+        self.assertEqual((code, document['error']), (3, 'BottleConflict'))
+
+    def adapter_after_publish(self):
+        reg = fixture('patronus', 'registration')
+        api = '/repos/darkquasar/homebrew-tap/releases'
+        responses = {('POST', api): dict(id=7, draft=True, tag_name='patronus-2.7.1'),
+                     ('PATCH', api + '/7'): dict(id=7, draft=False, tag_name='patronus-2.7.1')}
+        return reg, ReleaseAdapter.adapter(self, responses)
+
+    def test_own_draft_authority_ends_at_publication_and_is_bound_to_its_tag(self):
+        name = 'patronus-2.7.1.arm64_sequoia.bottle.tar.gz'
+        reg, (gh, calls) = self.adapter_after_publish()
+        gh.create_bottle_draft(reg, '2.7.1', 'x', 'a' * 40)
+        count = len(calls)
+        for action in [lambda: gh.upload_bottle(reg, '2.7.2', 7, name.replace('2.7.1', '2.7.2'), b'data'),
+                       lambda: gh.publish_bottle_draft(reg, '2.7.2', 7),
+                       lambda: gh.draft_assets(reg, '2.7.2', 7),
+                       lambda: gh.delete_bottle_draft(reg, '2.7.2', 7)]:
+            with self.assertRaises(ValueError):
+                action()
+        self.assertEqual(len(calls), count)
+        gh.publish_bottle_draft(reg, '2.7.1', 7)
+        count = len(calls)
+        for action in [lambda: gh.upload_bottle(reg, '2.7.1', 7, name, b'data'),
+                       lambda: gh.publish_bottle_draft(reg, '2.7.1', 7),
+                       lambda: gh.publish_bottle_draft(reg, '2.7.2', 7),
+                       lambda: gh.draft_assets(reg, '2.7.1', 7)]:
+            with self.assertRaises(ValueError):
+                action()
+        self.assertEqual(len(calls), count)
+
+    def example(self):
+        from pathlib import Path
+        path = Path(__file__).parent / 'fixtures' / 'bottles' / 'native-checks.example.json'
+        return json.loads(path.read_text())
+
+    def test_malformed_native_evidence_is_invalid_and_fails_every_gate_closed(self):
+        import copy
+        from distribution.bottles import NativeEvidenceInvalid, native_failures, validate_native_checks
+        from distribution.state import file_digest
+        from distribution.validation import render
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        def mutate(change):
+            document = copy.deepcopy(self.example())
+            change(document)
+            return document
+        cases = {
+            'bottle_set unknown field': lambda d: d['brew']['bottle_set'].update(unexpected=True),
+            'bottle_set missing field': lambda d: d['brew']['bottle_set'].pop('cellar'),
+            'bottle_set tags not digests': lambda d: d['brew']['bottle_set'].update(tags={'arm64_sequoia': 1}),
+            'brew source list': lambda d: d['brew'].update(source=[]),
+            'schema_version text': lambda d: d.update(schema_version='1'),
+            'app list': lambda d: d.update(app=['patronus']),
+            'candidates digest int': lambda d: d['candidates'].update(scoop=1),
+            'manager list': lambda d: d['results'][0].update(manager=['brew']),
+            'platform dict': lambda d: d['results'][0].update(platform={}),
+            'outcome list': lambda d: d['results'][0].update(outcome=['passed']),
+            'step value list': lambda d: d['results'][0]['steps'].update(install=['passed']),
+            'binding int': lambda d: d['results'][0].update(binding=7),
+            'results dict': lambda d: d.update(results={}),
+            'run id text': lambda d: d['run'].update(id='40'),
+        }
+        context = dict(run_id=40, attempt=1)
+        for label, change in cases.items():
+            document = mutate(change)
+            with self.subTest(case=label):
+                with self.assertRaises(NativeEvidenceInvalid):
+                    validate_native_checks(document)
+                for channel in ['scoop', 'winget']:
+                    failing = native_failures(channel, reg, snap, document,
+                                              file_digest(render(channel, reg, snap)), context)
+                    self.assertTrue(failing and failing[0].startswith('native-checks.json invalid'), failing)

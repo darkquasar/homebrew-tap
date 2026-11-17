@@ -110,6 +110,8 @@ def verify_bottle(archive, registration, snapshot, tag):
                 seen.add(name)
                 if member.issym() or member.islnk():
                     raise BottleInvalid('link member forbidden: ' + name)
+                if member.issparse() or any(key.startswith('GNU.sparse') for key in member.pax_headers):
+                    raise BottleInvalid('sparse member forbidden: ' + name)
                 if member.mode & 0o7000:
                     raise BottleInvalid('special permission bits forbidden: ' + name)
                 if member.isdir():
@@ -118,9 +120,11 @@ def verify_bottle(archive, registration, snapshot, tag):
                 elif member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                     if name not in files:
                         raise BottleInvalid('unexpected file member: ' + name)
-                    data = tar.extractfile(member).read()
+                    source, hasher = tar.extractfile(member), hashlib.sha256()
+                    for chunk in iter(lambda: source.read(65536), b''):
+                        hasher.update(chunk)
                     if name == executable:
-                        digest = hashlib.sha256(data).hexdigest()
+                        digest = hasher.hexdigest()
                 else:
                     raise BottleInvalid('special member forbidden: ' + name)
             while stream.readinto(bytearray(65536)):
@@ -134,7 +138,8 @@ def verify_bottle(archive, registration, snapshot, tag):
     if digest != expected:
         for other in BREW_PLATFORMS:
             if identity['assets'][c['assets'][other]]['sha256'] == digest:
-                raise BottleInvalid(f'executable {executable} is the {other} asset, not {platform} for tag {tag}')
+                raise BottleConflict(f'bottled executable {executable} is the {other} asset, not {platform} '
+                                     f'for tag {tag}')
         raise BottleConflict(f'bottled executable {executable} sha256 {digest} differs from '
                              f'snapshot {platform} sha256 {expected}')
     return dict(tag=tag, sha256=hashlib.sha256(archive).hexdigest(), executable_sha256=digest,
@@ -332,8 +337,23 @@ def _exact(value, names, where):
         raise NativeEvidenceInvalid(f'{where}: missing or unknown fields (expected {names})')
 
 
+def _choice(value, allowed, name):
+    if type(value) is not str or value not in allowed:
+        raise NativeEvidenceInvalid('invalid ' + name)
+    return value
+
+
 def validate_native_checks(document):
     """Strict schema v1 check; returns a deep copy. Bindings are checked by native_failures."""
+    try:
+        return _validate_native_checks(document)
+    except NativeEvidenceInvalid:
+        raise
+    except (TypeError, KeyError, AttributeError, ValueError) as error:
+        raise NativeEvidenceInvalid('malformed native-checks.json: ' + str(error)) from None
+
+
+def _validate_native_checks(document):
     from .contracts import CONTROL_REPOSITORY, VERSION, positive_id
     _exact(document, 'schema_version app version snapshot_digest configuration_digest candidates brew '
            'results run', 'native-checks')
@@ -350,10 +370,14 @@ def validate_native_checks(document):
     brew = document['brew']
     if brew is not None:
         _exact(brew, 'source bottle_set identity', 'brew')
-        if brew['source'] not in {'published', 'fresh'}:
-            raise NativeEvidenceInvalid('brew source must be published or fresh')
-        if type(brew['bottle_set']) is not dict:
-            raise NativeEvidenceInvalid('brew bottle_set must be an object')
+        _choice(brew['source'], {'published', 'fresh'}, 'brew source')
+        _exact(brew['bottle_set'], 'release_tag root_url cellar tags', 'brew bottle_set')
+        for name in ['release_tag', 'root_url', 'cellar']:
+            _text(brew['bottle_set'][name], 'bottle_set ' + name)
+        tags = brew['bottle_set']['tags']
+        if type(tags) is not dict or not 0 < len(tags) <= 8 or not all(
+                type(tag) is str and matches(DIGEST, digest) for tag, digest in tags.items()):
+            raise NativeEvidenceInvalid('brew bottle_set tags must map tag names to sha256 digests')
         _exact(brew['identity'], 'formula_sha256 bottle_set_sha256 snapshot_digest configuration_digest',
                'brew identity')
         if not all(matches(DIGEST, v) for v in brew['identity'].values()):
@@ -365,19 +389,18 @@ def validate_native_checks(document):
     for entry in results:
         _exact(entry, 'manager platform outcome reason runner image image_version manager_version steps binding',
                'result')
-        if entry['manager'] not in MANAGER_PLATFORMS or entry['platform'] not in MANAGER_PLATFORMS[entry['manager']]:
-            raise NativeEvidenceInvalid('unsupported manager/platform result')
+        _choice(entry['manager'], MANAGER_PLATFORMS, 'result manager')
+        _choice(entry['platform'], MANAGER_PLATFORMS[entry['manager']], 'result platform')
         key = (entry['manager'], entry['platform'])
         if key in seen:
             raise NativeEvidenceInvalid('duplicate result for ' + '/'.join(key))
         seen.add(key)
-        if entry['outcome'] not in OUTCOMES:
-            raise NativeEvidenceInvalid('invalid outcome')
+        _choice(entry['outcome'], OUTCOMES, 'outcome')
         for name in ['reason', 'runner', 'image', 'image_version', 'manager_version']:
             _text(entry[name], name)
         _exact(entry['steps'], ' '.join(STEPS), 'steps')
-        if not all(entry['steps'][step] in STEP_STATES for step in STEPS):
-            raise NativeEvidenceInvalid('invalid step outcome')
+        for step in STEPS:
+            _choice(entry['steps'][step], STEP_STATES, 'step outcome')
         if entry['outcome'] == 'passed' and any(entry['steps'][s] != 'passed' for s in STEPS):
             raise NativeEvidenceInvalid('passed result with a step that did not pass')
         if entry['outcome'] == 'statically-mapped' and any(entry['steps'][s] != 'not-run' for s in STEPS):

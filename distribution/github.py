@@ -32,7 +32,7 @@ class GitHub:
         self.write_role = None
         self.configuration = None
         self.source = WindowsSource(self)
-        self.own_drafts = set()
+        self.own_drafts = {}  # release id -> the tap tag this adapter created it for
 
     def run(self, repository, run_id, attempt):
         raw = self.request('GET', f'/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}')
@@ -209,9 +209,9 @@ class GitHub:
                     and self.configuration['app'] == c['app'], 'bottle release write scope denied')
         return repository, c['app'] + '-' + version
 
-    def _own_draft(self, release_id):
-        require(positive_id(release_id) and release_id in self.own_drafts,
-                'refusing to act on a release this publisher did not create')
+    def _own_draft(self, release_id, tag):
+        require(positive_id(release_id) and self.own_drafts.get(release_id) == tag,
+                'refusing to act on a release that is not this publisher\'s unpublished draft for ' + tag)
 
     def published_release(self, registration, version):
         repository, tag = self._bottle_release(registration, version)
@@ -247,12 +247,12 @@ class GitHub:
             raise
         require(raw['draft'] is True and raw['tag_name'] == tag and positive_id(raw['id']),
                 'draft release read-back mismatch')
-        self.own_drafts.add(raw['id'])
+        self.own_drafts[raw['id']] = tag
         return dict(id=raw['id'])
 
     def upload_bottle(self, registration, version, release_id, name, data):
-        repository, _tag = self._bottle_release(registration, version, write=True)
-        self._own_draft(release_id)
+        repository, tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id, tag)
         require(matches(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.bottle\.tar\.gz', name) and '..' not in name
                 and type(data) is bytes and 0 < len(data) <= 256*1024*1024, 'invalid bottle upload')
         raw = self.request('POST', f'https://uploads.github.com/repos/{repository}/releases/{release_id}'
@@ -263,7 +263,7 @@ class GitHub:
 
     def draft_assets(self, registration, version, release_id):
         repository, tag = self._bottle_release(registration, version, write=True)
-        self._own_draft(release_id)
+        self._own_draft(release_id, tag)
         raw = self.request('GET', f'/repos/{repository}/releases/{release_id}', privileged=True)
         require(raw['id'] == release_id and raw['draft'] is True and raw['tag_name'] == tag,
                 'own draft unavailable')
@@ -278,7 +278,7 @@ class GitHub:
 
     def publish_bottle_draft(self, registration, version, release_id):
         repository, tag = self._bottle_release(registration, version, write=True)
-        self._own_draft(release_id)
+        self._own_draft(release_id, tag)
         try:
             raw = self.request('PATCH', f'/repos/{repository}/releases/{release_id}',
                                dict(draft=False, tag_name=tag, make_latest='false'))
@@ -288,16 +288,18 @@ class GitHub:
                 if current is not None and current['id'] != release_id:
                     raise ReleaseTagTaken(tag) from None
             raise
+        # Draft authority ends at publication: a published release is never mutated again.
+        self.own_drafts.pop(release_id, None)
         require(raw['id'] == release_id and raw['draft'] is False and raw['tag_name'] == tag,
                 'release publication read-back mismatch')
 
     def delete_bottle_draft(self, registration, version, release_id):
-        repository, _tag = self._bottle_release(registration, version, write=True)
-        self._own_draft(release_id)
+        repository, tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id, tag)
         raw = self.request('GET', f'/repos/{repository}/releases/{release_id}', privileged=True)
         require(raw['id'] == release_id and raw['draft'] is True, 'refusing to delete a published release')
         self.request('DELETE', f'/repos/{repository}/releases/{release_id}')
-        self.own_drafts.discard(release_id)
+        self.own_drafts.pop(release_id, None)
 
     def diff_paths(self, repository, base, head):
         require(matches(SHA,base) and matches(SHA,head), 'diff requires immutable commits')
