@@ -8,7 +8,8 @@ param(
     [ValidateSet('Register','Check','Lifecycle','Fresh')][string]$Phase = 'Check',
     [ValidateSet('amd64','arm64')][string]$Architecture = 'amd64',
     [ValidateSet('scoop','winget')][string]$Manager = 'scoop',
-    [string]$Tag = 'fresh'
+    [string]$Tag = 'fresh',
+    [string]$ExpectedSha = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -129,20 +130,25 @@ if ($Phase -eq 'Fresh') {
             } else { throw "Unexpected WinGet executable resolution: $($command.Source)" }
         }
         $result.sha256 = (Get-FileHash $result.target -Algorithm SHA256).Hash.ToLowerInvariant()
-        $previous = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            $result.output = ((& $command.Source --version 2>&1) | Out-String).Trim()
-        } finally { $ErrorActionPreference = $previous }
+        # Only the host architecture's snapshot asset is executed, with a time bound: a foreign
+        # executable can block a non-interactive session on an error dialog.
+        if (!$ExpectedSha -or $result.sha256 -eq $ExpectedSha) {
+            $stdout = "$Work/fresh-$Manager-$Tag.out"
+            $process = Start-Process -FilePath $command.Source -ArgumentList '--version' -NoNewWindow -PassThru `
+                -RedirectStandardOutput $stdout -RedirectStandardError "$stdout.err"
+            if (!$process.WaitForExit(60000)) { $process.Kill(); throw "$app --version exceeded 60 seconds" }
+            $result.output = ((Get-Content $stdout, "$stdout.err" -ErrorAction SilentlyContinue) | Out-String).Trim()
+        }
     }
     Write-Json "$Work/fresh-$Manager-$Tag.json" $result
     exit 0
 }
 
-function Get-Fresh([string]$Name, [string]$Tag) {
-    $null = Invoke-Native -Step "fresh-$Name-$Tag" -File 'powershell.exe' -Arguments @(
-        '-NoProfile','-File',"$Work/user.ps1",'-Work',$Work,'-Phase','Fresh','-Architecture',$Architecture,
-        '-Manager',$Name,'-Tag',$Tag)
+function Get-Fresh([string]$Name, [string]$Tag, [string]$ExpectedSha = '') {
+    $arguments = @('-NoProfile','-File',"$Work/user.ps1",'-Work',$Work,'-Phase','Fresh',
+        '-Architecture',$Architecture,'-Manager',$Name,'-Tag',$Tag)
+    if ($ExpectedSha) { $arguments += @('-ExpectedSha',$ExpectedSha) }
+    $null = Invoke-Native -Step "fresh-$Name-$Tag" -File 'powershell.exe' -Arguments $arguments
     return Get-Content "$Work/fresh-$Name-$Tag.json" -Raw | ConvertFrom-Json
 }
 
@@ -274,7 +280,7 @@ function Test-Scoop {
             $script:installedScoop = $true
             $null = Scoop 'scoop-install' @('install',"darkquasar/$app",'--arch',$scoopArch,'--no-update-scoop')
         }
-        Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'scoop' 'installed') $expected }
+        Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'scoop' 'installed' $expected.Sha256) $expected }
         Invoke-Step $report 'uninstall' {
             $null = Scoop 'scoop-uninstall' @('uninstall',$app)
             $script:installedScoop = $false
@@ -321,7 +327,7 @@ function Test-WinGet([string]$WinGet) {
                 '--architecture',$wingetArch,'--accept-package-agreements','--accept-source-agreements',
                 '--disable-interactivity')
         }
-        Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'winget' 'installed') $expected }
+        Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'winget' 'installed' $expected.Sha256) $expected }
         Invoke-Step $report 'uninstall' {
             $null = Invoke-Native -Step 'winget-list' -File $WinGet -AllowFailure -Arguments @(
                 'list','--id',$expected.Identifier,'--exact','--disable-interactivity')
@@ -425,17 +431,21 @@ function Invoke-Lifecycle([string]$WinGet) {
     $stages = New-Object Collections.ArrayList
     $bucket = New-Bucket 'older'
     $null = Scoop 'life-scoop-install' @('install',"darkquasar/$app",'--arch',$scoopArch,'--no-update-scoop')
-    $fresh = Get-Fresh 'scoop' 'life-installed'; Assert-Resolved $fresh $older; Test-Preservation 'scoop-installed'
+    $fresh = Get-Fresh 'scoop' 'life-installed' $older.Sha256; Assert-Resolved $fresh $older; Test-Preservation 'scoop-installed'
     Add-Stage $stages 'installed' "scoop install darkquasar/$app" $fresh
     Copy-Item "$Work/inputs/current/staging/scoop/bucket/$app.json" "$bucket/bucket/$app.json" -Force
     $null = Invoke-Native -Step 'bucket-advance' -File 'git.exe' -Arguments @('-C',$bucket,'-c','user.name=Native Fixture',
         '-c','user.email=fixture@example.invalid','commit','-am','Advance staging bucket to the newer candidate')
-    # Keep the pinned Scoop core: hold its self-update so `scoop update` refreshes buckets only.
+    # Keep the pinned Scoop core if `scoop update <app>` decides Scoop is outdated.
     $null = Scoop 'life-scoop-hold' @('config','hold_update_until','2099-12-31')
-    $null = Scoop 'life-scoop-update' @('update')
+    # Bare `scoop update` in the pinned Scoop aborts when no 'main' bucket exists (it would clone
+    # the mutable upstream Main bucket), so refresh the registered bucket exactly as its bucket
+    # sync does, with `git pull`, then run the documented `scoop update <app>`.
+    $null = Invoke-Native -Step 'life-scoop-bucket-pull' -File 'git.exe' -Arguments @(
+        '-C',"$env:SCOOP\buckets\darkquasar",'pull','-q')
     $null = Scoop 'life-scoop-update-app' @('update',$app)
-    $fresh = Get-Fresh 'scoop' 'life-upgraded'; Assert-Resolved $fresh $current; Test-Preservation 'scoop-upgraded'
-    Add-Stage $stages 'upgraded' "scoop update; scoop update $app" $fresh
+    $fresh = Get-Fresh 'scoop' 'life-upgraded' $current.Sha256; Assert-Resolved $fresh $current; Test-Preservation 'scoop-upgraded'
+    Add-Stage $stages 'upgraded' "git pull (bucket); scoop update $app" $fresh
     $null = Scoop 'life-scoop-uninstall' @('uninstall',$app)
     $fresh = Get-Fresh 'scoop' 'life-removed'
     if ($fresh.found -or (Test-Path "$env:SCOOP/shims/$app.exe")) { throw 'Scoop uninstall left the command' }
@@ -453,10 +463,10 @@ function Invoke-Lifecycle([string]$WinGet) {
     }
     $common = @('--architecture',$wingetArch,'--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
     $null = Invoke-Native -Step 'life-winget-install' -File $WinGet -Arguments (@('install','--manifest',$oldManifest) + $common)
-    $fresh = Get-Fresh 'winget' 'life-installed'; Assert-Resolved $fresh $older; Test-Preservation 'winget-installed'
+    $fresh = Get-Fresh 'winget' 'life-installed' $older.Sha256; Assert-Resolved $fresh $older; Test-Preservation 'winget-installed'
     Add-Stage $stages 'installed' "winget install --manifest $oldManifest" $fresh
     $null = Invoke-Native -Step 'life-winget-upgrade' -File $WinGet -Arguments (@('upgrade','--manifest',$newManifest) + $common)
-    $fresh = Get-Fresh 'winget' 'life-upgraded'; Assert-Resolved $fresh $current; Test-Preservation 'winget-upgraded'
+    $fresh = Get-Fresh 'winget' 'life-upgraded' $current.Sha256; Assert-Resolved $fresh $current; Test-Preservation 'winget-upgraded'
     Add-Stage $stages 'upgraded' "winget upgrade --manifest $newManifest" $fresh
     $null = Invoke-Native -Step 'life-winget-uninstall' -File $WinGet -Arguments @(
         'uninstall','--manifest',$newManifest,'--accept-source-agreements','--disable-interactivity')

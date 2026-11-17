@@ -137,12 +137,15 @@ resolved_check() {  # resolved_check PREPARE PLATFORM VERSION LOG
   case "$path" in "$(brew --prefix)"/bin/*) ;; *) echo "install-failed: $FORMULA resolves to $path, not the Homebrew prefix"; return 1 ;; esac
   sha="$(file_sha "$path")"
   expected="$(expected_sha "$1" "$2")"
-  output="$("$path" --version 2>&1)"
   { echo "path: $path"; echo "realpath: $("${PY[@]}" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path")"
-    echo "sha256: $sha"; echo "expected: $expected"; echo "output: $output"; } > "$4"
+    echo "sha256: $sha"; echo "expected: $expected"; } > "$4"
+  # Only the host architecture's snapshot asset is ever executed.
   if [ "$sha" != "$expected" ]; then
     echo "architecture-mismatch: resolved executable sha256 $sha is not the $2 snapshot asset $expected"; return 1
   fi
+  output="$("${PY[@]}" -c 'import subprocess,sys
+r=subprocess.run([sys.argv[1],"--version"],capture_output=True,text=True,timeout=60); print((r.stdout+r.stderr).strip())' "$path" 2>&1)"
+  echo "output: $output" >> "$4"
   case "$output" in
     *"v$3"*) ;;
     *) echo "version-mismatch: expected v$3, got: $output"; return 1 ;;
