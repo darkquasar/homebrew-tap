@@ -1,0 +1,559 @@
+name: native-checks
+
+# Per-release native package checks (PD-17), bottle builds (PD-16) and the one-time
+# lifecycle acceptance (PD-13, fixture mode only). Every job is unprivileged: no
+# environment, no secrets, contents: read. Only the distribute.yml publisher writes.
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: release (record_ref from authority) or fixture (synthetic binaries on loopback)
+        type: string
+        required: true
+      record_ref:
+        description: Release mode only; the authority job's record_ref JSON
+        type: string
+        default: ''
+      lifecycle:
+        description: Fixture mode only; add the PD-13 upgrade and preservation acceptance
+        type: boolean
+        default: false
+      expect_failure:
+        description: Fixture mode only; arch or version stages a wrong candidate that must fail (AC-17)
+        type: string
+        default: ''
+      label:
+        description: Artifact name prefix, distinct per call within one workflow run
+        type: string
+        default: native
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      brew_matrix: ${{ steps.matrix.outputs.brew }}
+      windows_matrix: ${{ steps.matrix.outputs.windows }}
+    env:
+      MODE: ${{ inputs.mode }}
+      RECORD_REF: ${{ inputs.record_ref }}
+      LIFECYCLE: ${{ inputs.lifecycle }}
+      EXPECT_FAILURE: ${{ inputs.expect_failure }}
+    steps:
+      - name: Check the requested mode
+        shell: bash
+        run: |
+          set -eu
+          case "$MODE" in
+            release) test -n "$RECORD_REF"; test "$LIFECYCLE" = false; test -z "$EXPECT_FAILURE" ;;
+            fixture) test -z "$RECORD_REF"
+                     case "$EXPECT_FAILURE" in ''|arch|version) ;; *) exit 1 ;; esac
+                     test -z "$EXPECT_FAILURE" || test "$LIFECYCLE" = false ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - name: Install the accepted hash-locked validation dependencies
+        run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
+      - name: Runner matrices from pins
+        id: matrix
+        shell: bash
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          pins = json.load(open('distribution/native/pins.json'))
+          static = pins['statically_mapped']
+          print('brew=' + json.dumps([dict(platform=k, runner=v) for k, v in pins['brew_runners'].items()]))
+          print('windows=' + json.dumps([dict(platform=k, runner=v) for k, v in pins['windows_runners'].items()
+                                         if k not in static]))
+          PY
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.mode == 'fixture'
+        with:
+          go-version: '1.25.3'
+          cache: false
+      - name: Build synthetic executables once for every platform (fixture)
+        if: inputs.mode == 'fixture'
+        shell: bash
+        run: |
+          set -eu
+          for version in 2.7.0 2.7.1; do
+            for target in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+              suffix=''; case "$target" in windows-*) suffix=.exe ;; esac
+              CGO_ENABLED=0 GOOS="${target%-*}" GOARCH="${target#*-}" GOTOOLCHAIN=local \
+                go build -trimpath -ldflags "-s -w -buildid= -X main.name=patronus -X main.version=$version" \
+                -o "$RUNNER_TEMP/binaries/$version/patronus-$target$suffix" distribution/native/fixture/main.go
+            done
+          done
+          go version
+          sha256sum "$RUNNER_TEMP"/binaries/*/*
+      - name: Stage fixture candidates
+        if: inputs.mode == 'fixture'
+        shell: bash
+        run: |
+          set -eu
+          args=(--binaries "$RUNNER_TEMP/binaries" --version 2.7.1 --loopback http://127.0.0.1:18765)
+          case "$EXPECT_FAILURE" in
+            version) args+=(--assets-version 2.7.0 --expect-failure version) ;;
+            arch) args+=(--expect-failure arch) ;;
+          esac
+          python3 -B -m distribution.native.prepare fixture "${args[@]}" --out "$RUNNER_TEMP/native/current"
+          if [ "$LIFECYCLE" = true ]; then
+            python3 -B -m distribution.native.prepare fixture --binaries "$RUNNER_TEMP/binaries" --version 2.7.0 \
+              --loopback http://127.0.0.1:18767 --out "$RUNNER_TEMP/native/older"
+          fi
+      - name: Load the recorded snapshot (release)
+        if: inputs.mode == 'release'
+        id: record
+        shell: bash
+        run: |
+          set -eu
+          python3 - "$RECORD_REF" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, re, sys
+          ref = json.loads(sys.argv[1])
+          assert re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', ref['app'])
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', ref['version'])
+          assert re.fullmatch(r'[0-9a-f]{40}', ref['records_commit'])
+          print(f"app={ref['app']}\nversion={ref['version']}\ncommit={ref['records_commit']}")
+          PY
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: inputs.mode == 'release'
+        with:
+          ref: ${{ steps.record.outputs.commit }}
+          path: .records
+          persist-credentials: false
+      - name: Stage release candidates with the real release URLs
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          APP: ${{ steps.record.outputs.app }}
+          VERSION: ${{ steps.record.outputs.version }}
+        run: |
+          set -eu
+          python3 -B -m distribution.native.prepare release \
+            --registration ".distribution/registrations/$APP.json" \
+            --snapshot ".records/.distribution/releases/$APP/$VERSION.json" \
+            --record-ref "$RECORD_REF" --out "$RUNNER_TEMP/native/current"
+      - name: Inventory
+        shell: bash
+        run: find "$RUNNER_TEMP/native" -type f -exec sha256sum {} + | sort -k 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  select:
+    needs: render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      source: ${{ steps.select.outputs.source }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - name: Select a published bottle set or a fresh build
+        id: select
+        shell: bash
+        env:
+          # Read-only public release reads; this job builds, installs and runs nothing.
+          GITHUB_TOKEN: ${{ inputs.mode == 'release' && github.token || '' }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/selection"
+          if [ "$MODE" = release ]; then
+            python3 -B -m distribution.native.prepare select --prepare "$RUNNER_TEMP/native/current" --out "$out"
+          else
+            mkdir -p "$out"
+            printf '%s\n' '{"reason": "fixture mode builds fresh bottles", "source": "fresh"}' > "$out/selection.json"
+          fi
+          echo "source=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "$out/selection.json")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.label }}-selection
+          path: ${{ runner.temp }}/selection
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  brew-build:
+    needs: [render, select]
+    if: needs.select.outputs.source == 'fresh'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.render.outputs.brew_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: python
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - name: Homebrew host
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: distribution/native/brew_check.sh setup "$RUNNER_TEMP/build"
+      - name: Build and verify the bottle
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+          LIFECYCLE: ${{ inputs.lifecycle }}
+        run: |
+          older=''
+          if [ "$LIFECYCLE" = true ]; then older="$RUNNER_TEMP/native/older"; fi
+          distribution/native/brew_check.sh build "${{ matrix.platform }}" "$RUNNER_TEMP/build" \
+            "$RUNNER_TEMP/native/current" $older
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-bottle-${{ matrix.platform }}
+          path: ${{ runner.temp }}/build
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  assemble:
+    needs: [render, select, brew-build]
+    if: >-
+      !cancelled() && needs.render.result == 'success' && inputs.expect_failure != 'arch' &&
+      (needs.select.outputs.source == 'published' || needs.brew-build.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ${{ inputs.label }}-bottle-*
+          path: ${{ runner.temp }}/built
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-selection
+          path: ${{ runner.temp }}/selection
+      - name: Verify four bottles and stage the bottled formula
+        shell: bash
+        env:
+          SOURCE: ${{ needs.select.outputs.source }}
+        run: |
+          set -eu
+          archives="$RUNNER_TEMP/built"
+          if [ "$SOURCE" = published ]; then archives="$RUNNER_TEMP/selection/archives"; fi
+          python3 -B -m distribution.native.prepare bottles --prepare "$RUNNER_TEMP/native/current" \
+            --archives "$archives" --source "$SOURCE" --loopback http://127.0.0.1:18766 \
+            --out "$RUNNER_TEMP/brew/brew-current"
+          if [ -f "$RUNNER_TEMP/native/older/prepare.json" ]; then
+            python3 -B -m distribution.native.prepare bottles --prepare "$RUNNER_TEMP/native/older" \
+              --archives "$archives" --source fresh --loopback http://127.0.0.1:18766 \
+              --out "$RUNNER_TEMP/brew/brew-older"
+          fi
+          find "$RUNNER_TEMP/brew" -type f -exec sha256sum {} + | sort -k 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.label }}-brew-candidate
+          path: ${{ runner.temp }}/brew
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  brew-check:
+    needs: [render, assemble]
+    if: ${{ !cancelled() && needs.assemble.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.render.outputs.brew_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: python
+        with:
+          python-version: '3.12.10'
+      - name: Install the accepted hash-locked validation dependencies
+        run: '"${{ steps.python.outputs.python-path }}" -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-brew-candidate
+          path: ${{ runner.temp }}/brew
+      - name: Homebrew host
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: distribution/native/brew_check.sh setup "$RUNNER_TEMP/check"
+      - name: Pour, version, test and uninstall the bottled formula
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          distribution/native/brew_check.sh check "${{ matrix.platform }}" "$RUNNER_TEMP/check" \
+            "$RUNNER_TEMP/native/current" "$RUNNER_TEMP/brew/brew-current"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-brew-check-${{ matrix.platform }}
+          path: ${{ runner.temp }}/check
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  brew-lifecycle:
+    needs: [render, assemble]
+    if: ${{ !cancelled() && inputs.lifecycle && inputs.mode == 'fixture' && needs.assemble.result == 'success' }}
+    runs-on: macos-15
+    # One-time PD-13 acceptance: install, upgrade and uninstall with sentinel checks after each.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      RUNNER_LABEL: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: python
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-brew-candidate
+          path: ${{ runner.temp }}/brew
+      - name: Homebrew host
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: distribution/native/brew_check.sh setup "$RUNNER_TEMP/lifecycle"
+      - name: Bottled install, upgrade and uninstall with preservation sentinels
+        env:
+          NATIVE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          distribution/native/brew_check.sh lifecycle darwin-arm64 "$RUNNER_TEMP/lifecycle" \
+            "$RUNNER_TEMP/native/older" "$RUNNER_TEMP/brew/brew-older" \
+            "$RUNNER_TEMP/native/current" "$RUNNER_TEMP/brew/brew-current"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-brew-lifecycle
+          path: ${{ runner.temp }}/lifecycle
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  windows:
+    needs: render
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.render.outputs.windows_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -File {0}
+    steps:
+      - name: Preserve hash-pinned Git blob bytes on Windows
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - name: Scoop and WinGet as a normal user
+        run: |
+          ./distribution/native/windows_check.ps1 -Inputs "$env:RUNNER_TEMP/native" `
+            -Out "$env:RUNNER_TEMP/windows" -Mode check -RunnerLabel '${{ matrix.runner }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-windows-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/windows/*.json
+            ${{ runner.temp }}/windows/*.log
+            ${{ runner.temp }}/windows/*.txt
+            ${{ runner.temp }}/windows/*.inf
+            ${{ runner.temp }}/windows/winget-logs
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  windows-lifecycle:
+    needs: render
+    if: inputs.lifecycle && inputs.mode == 'fixture'
+    runs-on: windows-2025
+    # One-time PD-13 acceptance for Scoop and WinGet, each with sentinel checks after every edge.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -File {0}
+    steps:
+      - name: Preserve hash-pinned Git blob bytes on Windows
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - name: Scoop and WinGet install, upgrade and uninstall with preservation sentinels
+        run: |
+          ./distribution/native/windows_check.ps1 -Inputs "$env:RUNNER_TEMP/native" `
+            -Out "$env:RUNNER_TEMP/windows" -Mode lifecycle -RunnerLabel windows-2025
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-windows-lifecycle
+          path: |
+            ${{ runner.temp }}/windows/*.json
+            ${{ runner.temp }}/windows/*.log
+            ${{ runner.temp }}/windows/*.txt
+            ${{ runner.temp }}/windows/winget-logs
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  summary:
+    needs: [render, select, brew-build, assemble, brew-check, windows]
+    if: ${{ !cancelled() && needs.render.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-inputs
+          path: ${{ runner.temp }}/native
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.label }}-selection
+          path: ${{ runner.temp }}/selection
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.assemble.result == 'success'
+        with:
+          name: ${{ inputs.label }}-brew-candidate
+          path: ${{ runner.temp }}/brew
+      - name: Collect platform reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ${{ inputs.label }}-*
+          path: ${{ runner.temp }}/reports
+      - name: Write native-checks.json
+        shell: bash
+        env:
+          EXPECT_FAILURE: ${{ inputs.expect_failure }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -u
+          brew="$RUNNER_TEMP/brew/brew-current/brew.json"
+          failure=''
+          source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "$RUNNER_TEMP/selection/selection.json")"
+          case "$source" in
+            conflict|unavailable) failure="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reason"])' "$RUNNER_TEMP/selection/selection.json")" ;;
+          esac
+          if [ ! -f "$brew" ]; then
+            brew=''
+            failure="${failure:-bottle-assembly-failed: no complete verified bottle set (see build reports)}"
+          fi
+          args=(--prepare "$RUNNER_TEMP/native/current/prepare.json" --brew "$brew" --reports "$RUNNER_TEMP/reports"
+                --pins distribution/native/pins.json --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
+                --out "$RUNNER_TEMP/native-checks/native-checks.json")
+          if [ -n "$failure" ]; then args+=(--brew-failure "$failure"); fi
+          if [ -n "$EXPECT_FAILURE" ]; then args+=(--expect-failure "$EXPECT_FAILURE"); fi
+          mkdir -p "$RUNNER_TEMP/native-checks"
+          python3 -B -m distribution.native.prepare summary "${args[@]}" > "$RUNNER_TEMP/native-checks/summary.log"
+          code=$?
+          cat "$RUNNER_TEMP/native-checks/summary.log"
+          python3 -B - "$RUNNER_TEMP/native-checks/native-checks.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          from distribution.bottles import validate_native_checks
+          document = validate_native_checks(json.load(open(sys.argv[1])))
+          print('| manager | platform | outcome | steps | runner | image | reason |\n|---|---|---|---|---|---|---|')
+          for e in document['results']:
+              steps = ' '.join(f"{k}={v}" for k, v in e['steps'].items())
+              print(f"| {e['manager']} | {e['platform']} | {e['outcome']} | {steps} | {e['runner']} | "
+                    f"{e['image']} {e['image_version']} | {e['reason']} |")
+          PY
+          exit $code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ inputs.label }}-checks
+          path: ${{ runner.temp }}/native-checks
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true

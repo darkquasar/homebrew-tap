@@ -1,0 +1,49 @@
+{
+  "provenance": {
+    "windows": "Ported from darkquasar/patronus tools/tests/package-windows-pins.json at a532c29203eb716d566cc622f0331525be1ee074",
+    "homebrew_installer": "darkquasar/patronus tools/vms/bootstrap-ubuntu.sh lines 12 to 25 at a532c29203eb716d566cc622f0331525be1ee074"
+  },
+  "python_version": "3.12.10",
+  "go_version": "1.25.3",
+  "fixture_versions": {"current": "2.7.1", "older": "2.7.0"},
+  "loopback": {"assets": "http://127.0.0.1:18765", "bottles": "http://127.0.0.1:18766"},
+  "brew_runners": {
+    "darwin-arm64": "macos-15",
+    "darwin-amd64": "macos-15-intel",
+    "linux-amd64": "ubuntu-24.04",
+    "linux-arm64": "ubuntu-24.04-arm"
+  },
+  "windows_runners": {
+    "windows-amd64": "windows-2025",
+    "windows-arm64": "windows-11-arm"
+  },
+  "lifecycle_runners": {"brew": "macos-15", "windows": "windows-2025"},
+  "statically_mapped": {},
+  "homebrew_installer": {
+    "url": "https://raw.githubusercontent.com/Homebrew/install/959bdd728192d78c47287c177796c3d86d111f09/install.sh",
+    "sha256": "5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148"
+  },
+  "scoop_commit": "e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f",
+  "bootstrap_commit": "1e2f334083d609986d8c8bc9e31ae8e87c39fab4",
+  "winget_commit": "000f6b55151cb0f1afd2933bb54c62a4724b9ca8",
+  "winget_version": "v1.29.380",
+  "manifest_version": "1.10.0",
+  "downloads": {
+    "scoop.zip": {
+      "url": "https://codeload.github.com/ScoopInstaller/Scoop/zip/e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f",
+      "sha256": "fa96b15950f3726d2c9a35493e192eefe56d2eddba718e8121c32f7a19257a0a"
+    },
+    "scoop-install.ps1": {
+      "url": "https://raw.githubusercontent.com/ScoopInstaller/Install/1e2f334083d609986d8c8bc9e31ae8e87c39fab4/install.ps1",
+      "sha256": "94f983b190438311e006b957db7c8422709e0ba62a6c2ac04e278164108f2512"
+    },
+    "winget.msixbundle": {
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+      "sha256": "65dea9c01ce08ee7b763366b27c0e651f97db857c11ca9b9c301826c10092f2e"
+    },
+    "winget-dependencies.zip": {
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/DesktopAppInstaller_Dependencies.zip",
+      "sha256": "ba875afe9d190f61218985ac0292a99d1db710bf93e13c68944ca9d89f0d82d1"
+    }
+  }
+}

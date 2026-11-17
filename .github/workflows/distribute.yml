@@ -143,8 +143,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  native-checks:
+    # PD-17: unprivileged per-release native checks and bottle builds for this record.
+    needs: authority
+    if: >-
+      github.repository == 'darkquasar/homebrew-tap' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/distribution-control' &&
+      needs.authority.outputs.record_ref != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-checks.yml
+    with:
+      mode: release
+      record_ref: ${{ needs.authority.outputs.record_ref }}
+      label: native
+
   publish:
-    needs: [authority, winget-source]
+    # A failed native check fails only its channel inside the publisher (native-check-failed).
+    needs: [authority, winget-source, native-checks]
     if: >-
       always() && !cancelled() && needs.authority.result == 'success' &&
       github.repository == 'darkquasar/homebrew-tap' &&
@@ -177,10 +193,29 @@ jobs:
           python-version: '3.12.11'
       - name: Install the accepted hash-locked validation dependencies
         run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
+      - name: Require fresh native evidence directories
+        shell: bash
+        run: test ! -e "$RUNNER_TEMP/native-evidence" && test ! -e "$RUNNER_TEMP/native-bottles"
+      # Untrusted unprivileged artifacts from this run. A missing artifact leaves the
+      # input absent and the publisher fails the affected channels closed.
+      - name: Retrieve this run's native-checks.json
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: native-checks
+          path: ${{ runner.temp }}/native-evidence
+      - name: Retrieve this run's checked bottle archives
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: native-brew-candidate
+          path: ${{ runner.temp }}/native-bottles
       - name: Admit source and execute isolated role
         id: control
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          DISTRIBUTION_NATIVE_CHECKS: ${{ runner.temp }}/native-evidence/native-checks.json
+          DISTRIBUTION_BOTTLES_DIR: ${{ runner.temp }}/native-bottles/brew-current/bottles
           DISTRIBUTION_ROLE: publish
           DISTRIBUTION_ENVIRONMENT: package-publisher
           DISTRIBUTION_RECORD_REF: ${{ needs.authority.outputs.record_ref }}

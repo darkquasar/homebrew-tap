@@ -2,6 +2,8 @@ name: distribution-ci
 
 on:
   pull_request:
+    # labeled: adding native-lifecycle or native-negative starts a run with those checks.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [distribution-control]
 
@@ -21,3 +23,60 @@ jobs:
           python-version: '3.12.11'
       - run: python3 -m pip install --require-hashes --no-deps -r distribution/validation-requirements.txt
       - run: python3 -B -m unittest discover -s distribution/tests -p 'test_*.py' -v
+
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      native: ${{ steps.diff.outputs.native }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does the PR change distribution code or workflows?
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          git diff --name-only "$BASE...$HEAD" | tee changed.txt
+          if grep -qE '^(distribution/|\.github/workflows/)' changed.txt; then native=true; else native=false; fi
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+
+  native-checks:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-checks.yml
+    with:
+      mode: fixture
+      lifecycle: ${{ contains(github.event.pull_request.labels.*.name, 'native-lifecycle') }}
+      label: native
+
+  native-negative-arch:
+    needs: changes
+    if: needs.changes.outputs.native == 'true' && contains(github.event.pull_request.labels.*.name, 'native-negative')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-checks.yml
+    with:
+      mode: fixture
+      expect_failure: arch
+      label: negative-arch
+
+  native-negative-version:
+    needs: changes
+    if: needs.changes.outputs.native == 'true' && contains(github.event.pull_request.labels.*.name, 'native-negative')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-checks.yml
+    with:
+      mode: fixture
+      expect_failure: version
+      label: negative-version
