@@ -75,7 +75,8 @@ function Register-WinGet {
         Where-Object { $_.FullName -match "[\\/]$folder[\\/]" })
     if ($dependencies.Count -lt 1) { throw "No pinned $folder WinGet runtime dependencies found." }
     $dependencies.FullName | Set-Content "$Work/appx-dependencies-$recordName.txt"
-    Add-AppxPackage -Path "$Work/downloads/winget.msixbundle" -DependencyPath $dependencies.FullName
+    # Disposable host: a shipped app (for example Widgets) may hold a framework the bundle updates.
+    Add-AppxPackage -Path "$Work/downloads/winget.msixbundle" -DependencyPath $dependencies.FullName -ForceApplicationShutdown
     $packages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller |
         Where-Object { $_.Architecture -eq $appxArch })
     if ($packages.Count -ne 1) { throw "Expected one registered $appxArch DesktopAppInstaller package." }
@@ -174,6 +175,7 @@ function Install-PinnedScoop {
     # Install pinned Scoop from source using the unchanged official bootstrap's
     # setup functions. Do not run Install-Scoop: it fetches mutable master refs.
     $env:SCOOP = "$env:USERPROFILE\scoop"
+    # Bootstrap helpers print progress; keep it out of this function's return value.
     & {
         Set-StrictMode -Off
         $env:SCOOP_NOINSTALL = 'true'
@@ -184,7 +186,7 @@ function Install-PinnedScoop {
         Import-ScoopShim
         Add-ShimsDirToPath
         Add-DefaultConfig
-    }
+    } | Out-Host
     $env:SCOOP_NOINSTALL = $null
     $scoop = "$env:SCOOP/apps/scoop/current/bin/scoop.ps1"
     # Use the .ps1 entry with normal policy. Upstream .cmd/.sh launchers contain
@@ -321,8 +323,11 @@ function Test-WinGet([string]$WinGet) {
         }
         Invoke-Step $report 'version' { Assert-Resolved (Get-Fresh 'winget' 'installed') $expected }
         Invoke-Step $report 'uninstall' {
+            $null = Invoke-Native -Step 'winget-list' -File $WinGet -AllowFailure -Arguments @(
+                'list','--id',$expected.Identifier,'--exact','--disable-interactivity')
             $null = Invoke-Native -Step 'winget-uninstall' -File $WinGet -Arguments @(
-                'uninstall','--id',$expected.Identifier,'--exact','--accept-source-agreements','--disable-interactivity')
+                'uninstall','--manifest',"$Work/inputs/current/staging/winget/$($expected.WinGetPath)",
+                '--accept-source-agreements','--disable-interactivity')
             $script:installedWinGet = $false
             if ((Get-Fresh 'winget' 'removed').found) { throw "uninstall-failed: $app still resolves after winget uninstall" }
         }
@@ -333,7 +338,8 @@ function Test-WinGet([string]$WinGet) {
     } finally {
         if ($script:installedWinGet) {
             $null = Invoke-Native -Step 'winget-cleanup-uninstall' -File $WinGet -AllowFailure -Arguments @(
-                'uninstall','--id',$expected.Identifier,'--exact','--accept-source-agreements','--disable-interactivity')
+                'uninstall','--manifest',"$Work/inputs/current/staging/winget/$($expected.WinGetPath)",
+                '--accept-source-agreements','--disable-interactivity')
         }
     }
 }
@@ -453,11 +459,11 @@ function Invoke-Lifecycle([string]$WinGet) {
     $fresh = Get-Fresh 'winget' 'life-upgraded'; Assert-Resolved $fresh $current; Test-Preservation 'winget-upgraded'
     Add-Stage $stages 'upgraded' "winget upgrade --manifest $newManifest" $fresh
     $null = Invoke-Native -Step 'life-winget-uninstall' -File $WinGet -Arguments @(
-        'uninstall','--id',$current.Identifier,'--exact','--accept-source-agreements','--disable-interactivity')
+        'uninstall','--manifest',$newManifest,'--accept-source-agreements','--disable-interactivity')
     $fresh = Get-Fresh 'winget' 'life-removed'
     if ($fresh.found) { throw 'WinGet uninstall left the command' }
     Test-Preservation 'winget-removed'
-    Add-Stage $stages 'removed' "winget uninstall --id $($current.Identifier) --exact" $fresh
+    Add-Stage $stages 'removed' "winget uninstall --manifest $newManifest" $fresh
     Write-Json "$Work/lifecycle-winget.json" ([ordered]@{ manager = 'winget'; platform = $platform; outcome = 'passed'
         package_shape = 'WinGet portable installer type from local multi-file manifests, default user scope'
         versions = @($older.Version, $current.Version); stages = $stages })

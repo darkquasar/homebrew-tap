@@ -120,6 +120,13 @@ p=sys.argv[1]; r=json.load(open(p+"/registration.json")); s=json.load(open(p+"/s
 print(s["payload"]["identity"]["assets"][r["configuration"]["assets"][sys.argv[2]]]["sha256"])' "$1" "$2"
 }
 
+# The pour line names the expected bottle: Homebrew prints the remote filename
+# (patronus-2.7.1.<tag>.bottle.tar.gz); its cache name uses two dashes.
+poured() {  # poured VERSION TAG LOG
+  local escaped="${1//./\\.}"
+  grep -qE "Pouring $FORMULA--?$escaped\.$2\.bottle\.tar\.gz" "$3"
+}
+
 file_sha() { "${PY[@]}" -c 'import hashlib,os,sys; print(hashlib.sha256(open(os.path.realpath(sys.argv[1]),"rb").read()).hexdigest())' "$1"; }
 
 # Version and identity of the resolved command. Prints a reason on failure.
@@ -232,12 +239,12 @@ d=json.load(open(sys.argv[1])); print(next(k for k in d["bottle_set"]["tags"] if
          --out "$out/validate.json" > "$out/validate.log" 2>&1; then validate=passed
     else validate=failed; reason='validation-failed: ruby -c / brew style / bottle block (see validate.json)'; break; fi
     if brew install "$TAP/$FORMULA" > "$out/install.log" 2>&1 \
-       && grep -q "Pouring $FORMULA--$version.$tag.bottle.tar.gz" "$out/install.log" \
+       && poured "$version" "$tag" "$out/install.log" \
        && ! grep -qi 'from source' "$out/install.log" \
        && brew info --json=v2 "$TAP/$FORMULA" > "$out/info.json" \
        && [ "$("${PY[@]}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["formulae"][0]["installed"][0]["poured_from_bottle"])' "$out/info.json")" = True ]; then
       install=passed
-    else install=failed; reason="install-failed: no pour of $FORMULA--$version.$tag.bottle.tar.gz (see install.log)"; break; fi
+    else install=failed; reason="install-failed: no pour of the $tag bottle for $version (see install.log)"; break; fi
     if reason="$(resolved_check "$prepare" "$platform" "$version" "$out/version.txt")" \
        && brew test "$TAP/$FORMULA" > "$out/test.log" 2>&1; then
       versioned=passed; reason=""
@@ -289,14 +296,14 @@ print(json.dumps(dict(stage=name,command=command,exit=int(code),resolution=v,pre
   cp "$older_brew/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
   trust
   brew install "$TAP/$FORMULA" > "$out/install.log" 2>&1 || die 'older bottled install failed'
-  grep -q "Pouring $FORMULA--$old_version.$tag.bottle.tar.gz" "$out/install.log" || die "no pour of $old_version"
+  poured "$old_version" "$tag" "$out/install.log" || die "no pour of $old_version"
   reason="$(resolved_check "$older" "$platform" "$old_version" "$out/version-installed.txt")" || die "$reason"
   preserved installed || die 'sentinels changed after install'
   stage installed "brew install $TAP/$FORMULA" 0 "$out/version-installed.txt" "$out/preservation-installed.json"
   # Advance the staging catalogue: the no-git tap now carries the newer canonical formula's staging copy.
   cp "$brew_dir/staging/brew/Formula/$FORMULA.rb" "$repo/Formula/$FORMULA.rb"
   brew upgrade "$TAP/$FORMULA" > "$out/upgrade.log" 2>&1 || die 'brew upgrade failed'
-  grep -q "Pouring $FORMULA--$new_version.$tag.bottle.tar.gz" "$out/upgrade.log" || die "upgrade did not pour $new_version"
+  poured "$new_version" "$tag" "$out/upgrade.log" || die "upgrade did not pour $new_version"
   ! grep -qi 'from source' "$out/upgrade.log" || die 'upgrade built from source'
   reason="$(resolved_check "$prepare" "$platform" "$new_version" "$out/version-upgraded.txt")" || die "$reason"
   preserved upgraded || die 'sentinels changed after upgrade'
