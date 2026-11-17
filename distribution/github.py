@@ -32,6 +32,7 @@ class GitHub:
         self.write_role = None
         self.configuration = None
         self.source = WindowsSource(self)
+        self.own_drafts = set()
 
     def run(self, repository, run_id, attempt):
         raw = self.request('GET', f'/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}')
@@ -195,6 +196,109 @@ class GitHub:
         return self.request('GET',f'https://github.com/{repository}/releases/download/{tag}/{name}',
                             raw=True,limit=limit,delivery='release')
 
+    # Tap bottle releases (PD-16). Tags are always <registered app>-<version> on the tap;
+    # writes need the admitted publisher scope for that same app and touch only drafts
+    # this adapter created. Published releases are never edited, re-uploaded or deleted.
+    def _bottle_release(self, registration, version, *, write=False):
+        c = validate_registration(registration)['configuration']
+        require(matches(VERSION, version), 'invalid bottle release version')
+        repository = c['destinations']['brew']['repository']
+        require(repository == CONTROL_REPOSITORY, 'bottle releases live only on the tap')
+        if write:
+            require(self.write_role == 'publish' and self.configuration is not None
+                    and self.configuration['app'] == c['app'], 'bottle release write scope denied')
+        return repository, c['app'] + '-' + version
+
+    def _own_draft(self, release_id):
+        require(positive_id(release_id) and release_id in self.own_drafts,
+                'refusing to act on a release this publisher did not create')
+
+    def published_release(self, registration, version):
+        repository, tag = self._bottle_release(registration, version)
+        try:
+            raw = self.request('GET', f'/repos/{repository}/releases/tags/{quote(tag, safe="")}')
+        except APIError as error:
+            if error.status == 404:
+                return None
+            raise
+        require(raw['tag_name'] == tag and raw['draft'] is False and positive_id(raw['id']),
+                'published release tag mismatch')
+        assets = self.pages(f"/repos/{repository}/releases/{raw['id']}/assets")
+        require(len(assets) <= 16, 'release asset bound exceeded')
+        return dict(id=raw['id'], tag=tag, draft=False,
+                    assets=[dict(id=a['id'], name=a['name'], size=a['size'], state=a['state']) for a in assets])
+
+    def download_bottle(self, registration, version, name):
+        repository, tag = self._bottle_release(registration, version)
+        require(matches(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.bottle\.tar\.gz', name) and '..' not in name,
+                'unapproved bottle asset name')
+        return self.request('GET', f'https://github.com/{repository}/releases/download/{tag}/{name}',
+                            raw=True, limit=256*1024*1024, delivery='release', timeout=300)
+
+    def create_bottle_draft(self, registration, version, body, target):
+        repository, tag = self._bottle_release(registration, version, write=True)
+        require(matches(SHA, target) and type(body) is str and len(body) <= 4096, 'invalid draft request')
+        try:
+            raw = self.request('POST', f'/repos/{repository}/releases', dict(tag_name=tag,
+                target_commitish=target, name=tag, body=body, draft=True, prerelease=False, make_latest='false'))
+        except APIError as error:
+            if error.status == 422 and self.published_release(registration, version) is not None:
+                raise ReleaseTagTaken(tag) from None
+            raise
+        require(raw['draft'] is True and raw['tag_name'] == tag and positive_id(raw['id']),
+                'draft release read-back mismatch')
+        self.own_drafts.add(raw['id'])
+        return dict(id=raw['id'])
+
+    def upload_bottle(self, registration, version, release_id, name, data):
+        repository, _tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id)
+        require(matches(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.bottle\.tar\.gz', name) and '..' not in name
+                and type(data) is bytes and 0 < len(data) <= 256*1024*1024, 'invalid bottle upload')
+        raw = self.request('POST', f'https://uploads.github.com/repos/{repository}/releases/{release_id}'
+                           f'/assets?name={quote(name, safe="")}', content=data, delivery='upload', timeout=300)
+        require(raw['name'] == name and raw['size'] == len(data) and raw['state'] == 'uploaded',
+                'uploaded asset read-back mismatch')
+        return dict(id=raw['id'], name=name, size=len(data))
+
+    def draft_assets(self, registration, version, release_id):
+        repository, tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id)
+        raw = self.request('GET', f'/repos/{repository}/releases/{release_id}', privileged=True)
+        require(raw['id'] == release_id and raw['draft'] is True and raw['tag_name'] == tag,
+                'own draft unavailable')
+        assets = self.pages(f'/repos/{repository}/releases/{release_id}/assets', privileged=True)
+        require(len(assets) <= 16, 'release asset bound exceeded')
+        result = {}
+        for asset in assets:
+            require(asset['name'] not in result and positive_id(asset['id']), 'ambiguous draft asset')
+            result[asset['name']] = self.request('GET', f"/repos/{repository}/releases/assets/{asset['id']}",
+                raw=True, limit=256*1024*1024, delivery='asset', privileged=True, timeout=300)
+        return result
+
+    def publish_bottle_draft(self, registration, version, release_id):
+        repository, tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id)
+        try:
+            raw = self.request('PATCH', f'/repos/{repository}/releases/{release_id}',
+                               dict(draft=False, tag_name=tag, make_latest='false'))
+        except APIError as error:
+            if error.status == 422:
+                current = self.published_release(registration, version)
+                if current is not None and current['id'] != release_id:
+                    raise ReleaseTagTaken(tag) from None
+            raise
+        require(raw['id'] == release_id and raw['draft'] is False and raw['tag_name'] == tag,
+                'release publication read-back mismatch')
+
+    def delete_bottle_draft(self, registration, version, release_id):
+        repository, _tag = self._bottle_release(registration, version, write=True)
+        self._own_draft(release_id)
+        raw = self.request('GET', f'/repos/{repository}/releases/{release_id}', privileged=True)
+        require(raw['id'] == release_id and raw['draft'] is True, 'refusing to delete a published release')
+        self.request('DELETE', f'/repos/{repository}/releases/{release_id}')
+        self.own_drafts.discard(release_id)
+
     def diff_paths(self, repository, base, head):
         require(matches(SHA,base) and matches(SHA,head), 'diff requires immutable commits')
         roots = [self.request('GET',f'/repos/{repository}/git/commits/{c}')['tree']['sha'] for c in [base,head]]
@@ -319,11 +423,12 @@ class GitHub:
             versions.append(entry['path'][:-5])
         return versions
 
-    def pages(self, path, key=None):
+    def pages(self, path, key=None, *, privileged=False):
         result = []
         separator = '&' if '?' in path else '?'
         for page in range(1,101):
-            raw = self.request('GET', f'{path}{separator}per_page=100&page={page}')
+            options = dict(privileged=True) if privileged else {}
+            raw = self.request('GET', f'{path}{separator}per_page=100&page={page}', **options)
             items = raw[key] if key else raw
             require(type(items) is list, 'incomplete API listing')
             result.extend(items)
@@ -405,6 +510,13 @@ class APIError(ValueError):
         super().__init__(f'GitHub HTTP {status}: {operation}')
 
 
+class ReleaseTagTaken(ValueError):
+    """Another release already owns <app>-<version>; this run lost the bottle race."""
+    def __init__(self, tag):
+        self.tag = tag
+        super().__init__(f'tap release tag {tag} is already published by another run')
+
+
 class RefOutcomeUnknown(ValueError):
     def __init__(self,repository,branch,commit):
         self.refs=dict(repository=repository,branch=branch,candidate_commit=commit)
@@ -422,25 +534,40 @@ class Transport:
         self.read_tokens = {}
 
     def __call__(self, method, path, body=None, *, raw=False, limit=8*1024*1024,
-                 delivery=None, token=None):
+                 delivery=None, token=None, content=None, privileged=False, timeout=30):
         require(method in {'GET','POST','PATCH','DELETE'}, 'unsupported API method')
+        require(type(timeout) in {int,float} and 0 < timeout <= 300, 'invalid request time bound')
         initial = 'https://api.github.com'+path if path.startswith('/') else path
         parsed = urlparse(initial)
         require(parsed.scheme == 'https' and parsed.port in {None,443} and not parsed.username
                 and not parsed.password and not parsed.fragment, 'unsafe API URL')
+        tap = re.escape(CONTROL_REPOSITORY)
         if delivery == 'release':
-            require(parsed.hostname == 'github.com' and method == 'GET'
-                    and matches(r'/darkquasar/[A-Za-z0-9_.-]+/releases/download/v'+VERSION+r'/[A-Za-z0-9_.-]+',parsed.path),
+            require(parsed.hostname == 'github.com' and method == 'GET' and not parsed.query
+                    and (matches(r'/darkquasar/[A-Za-z0-9_.-]+/releases/download/v'+VERSION+r'/[A-Za-z0-9_.-]+',parsed.path)
+                         or matches('/'+tap+r'/releases/download/[a-z][a-z0-9]*(?:-[a-z0-9]+)*-'+VERSION
+                                    +r'/[A-Za-z0-9_.-]+',parsed.path)),
                     'unapproved release URL')
+        elif delivery == 'upload':
+            require(parsed.hostname == 'uploads.github.com' and method == 'POST' and type(content) is bytes
+                    and matches('/repos/'+tap+r'/releases/[1-9][0-9]*/assets',parsed.path)
+                    and matches(r'name=[A-Za-z0-9_.-]+',parsed.query), 'unapproved release upload URL')
+        elif delivery == 'asset':
+            require(parsed.hostname == 'api.github.com' and method == 'GET' and raw and not parsed.query
+                    and matches('/repos/'+tap+r'/releases/assets/[1-9][0-9]*',parsed.path),
+                    'unapproved release asset URL')
         else:
-            require(parsed.hostname == 'api.github.com' and path.startswith('/'), 'arbitrary API URL denied')
+            require(parsed.hostname == 'api.github.com' and path.startswith('/') and content is None,
+                    'arbitrary API URL denied')
         if token is None:
-            token = self._read_token(path) if method == 'GET' else self._write_token(path)
-        data = json.dumps(body,separators=(',',':')).encode() if body is not None else None
+            token = (self._read_token(parsed.path) if method == 'GET' and not privileged
+                     else self._write_token(parsed.path))
+        require(body is None or content is None, 'one request body only')
+        data = json.dumps(body,separators=(',',':')).encode() if body is not None else content
         attempts = 4 if method == 'GET' else 1
         for attempt in range(attempts):
             url = initial
-            deadline = time.monotonic()+30
+            deadline = time.monotonic()+timeout
             try:
                 for _ in range(6):
                     parsed = urlparse(url)
@@ -450,16 +577,21 @@ class Transport:
                     if delivery == 'release':
                         require(host in {'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'},
                                 'unapproved release redirect host')
+                    elif delivery == 'asset':
+                        require(host in {'api.github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'},
+                                'unapproved release asset redirect host')
+                    elif delivery == 'upload':
+                        require(host == 'uploads.github.com', 'release upload redirect denied')
                     else:
                         require(host in {'api.github.com','results-receiver.actions.githubusercontent.com'}
                                 or re.fullmatch(r'productionresultssa[0-9]+\.blob\.core\.windows\.net',host or ''),
                                 'unapproved artifact redirect host')
                     headers = {'Accept':'application/octet-stream' if raw else 'application/vnd.github+json',
                                'User-Agent':'patronus-distribution','X-GitHub-Api-Version':'2022-11-28'}
-                    if host == 'api.github.com' and token:
+                    if token and (host == 'api.github.com' or (delivery == 'upload' and host == 'uploads.github.com')):
                         headers['Authorization'] = 'Bearer '+token
                     if data is not None:
-                        headers['Content-Type'] = 'application/json'
+                        headers['Content-Type'] = 'application/octet-stream' if content is not None else 'application/json'
                     remaining = deadline-time.monotonic()
                     require(remaining > 0, 'request time bound exceeded')
                     request = Request(url,data=data,headers=headers,method=method)

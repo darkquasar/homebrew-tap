@@ -1,0 +1,174 @@
+{
+  "app": "patronus",
+  "brew": {
+    "bottle_set": {
+      "cellar": "any_skip_relocation",
+      "release_tag": "patronus-2.7.1",
+      "root_url": "https://github.com/darkquasar/homebrew-tap/releases/download/patronus-2.7.1",
+      "tags": {
+        "arm64_linux": "eb31704fadaf4bd114787507a4efc833ecf8bf64815af09f86e616b8ccaa28c9",
+        "arm64_sequoia": "9e181c417af9130b6b02ba2e92204fc839784b751bbf4d162bde978ccb55c2f5",
+        "sequoia": "67421a30098568f00c97d866eda83862bc4d5a8f3c58c8db49eeef97a094220a",
+        "x86_64_linux": "9d38a419de9ea07299947d6ec9377bd22593f2b70c5a7cdb4f59df0fec289d33"
+      }
+    },
+    "identity": {
+      "bottle_set_sha256": "a2979a9dedf2323348d216414d621437f1c42f5bbec067ac0ab167159dd52cde",
+      "configuration_digest": "ff8987dd2a6a0956cba95de7c6203a5b07f985113110507fd33e2d6c2d02dede",
+      "formula_sha256": "b10533269007757159cf089f098a2c07c8b4a7e3b4afa40b01c47b9170c855e9",
+      "snapshot_digest": "8922df463a7fde802e931ab756b3aa187c41e6078e7e984ed7e7ebc79a63a869"
+    },
+    "source": "fresh"
+  },
+  "candidates": {
+    "scoop": "1375c1e4289e733a73da1f3c7fe41c1f79f769c6400fbd0bd93c04f8dd9708bc",
+    "winget": "47ecadebe0bebe8a5cf1c5be8e0ba634c71c63190936c661bc41b3a4c684e659"
+  },
+  "configuration_digest": "ff8987dd2a6a0956cba95de7c6203a5b07f985113110507fd33e2d6c2d02dede",
+  "results": [
+    {
+      "binding": "b10533269007757159cf089f098a2c07c8b4a7e3b4afa40b01c47b9170c855e9",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "brew",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "darwin-arm64",
+      "reason": "",
+      "runner": "fixture-darwin-arm64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "b10533269007757159cf089f098a2c07c8b4a7e3b4afa40b01c47b9170c855e9",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "brew",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "darwin-amd64",
+      "reason": "",
+      "runner": "fixture-darwin-amd64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "b10533269007757159cf089f098a2c07c8b4a7e3b4afa40b01c47b9170c855e9",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "brew",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "linux-amd64",
+      "reason": "",
+      "runner": "fixture-linux-amd64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "b10533269007757159cf089f098a2c07c8b4a7e3b4afa40b01c47b9170c855e9",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "brew",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "linux-arm64",
+      "reason": "",
+      "runner": "fixture-linux-arm64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "1375c1e4289e733a73da1f3c7fe41c1f79f769c6400fbd0bd93c04f8dd9708bc",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "scoop",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "windows-amd64",
+      "reason": "",
+      "runner": "fixture-windows-amd64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "1375c1e4289e733a73da1f3c7fe41c1f79f769c6400fbd0bd93c04f8dd9708bc",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "scoop",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "windows-arm64",
+      "reason": "",
+      "runner": "fixture-windows-arm64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "47ecadebe0bebe8a5cf1c5be8e0ba634c71c63190936c661bc41b3a4c684e659",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "winget",
+      "manager_version": "fixture-1.0",
+      "outcome": "passed",
+      "platform": "windows-amd64",
+      "reason": "",
+      "runner": "fixture-windows-amd64",
+      "steps": {
+        "install": "passed",
+        "uninstall": "passed",
+        "validate": "passed",
+        "version": "passed"
+      }
+    },
+    {
+      "binding": "47ecadebe0bebe8a5cf1c5be8e0ba634c71c63190936c661bc41b3a4c684e659",
+      "image": "fixture-image",
+      "image_version": "20261117.1",
+      "manager": "winget",
+      "manager_version": "fixture-1.0",
+      "outcome": "statically-mapped",
+      "platform": "windows-arm64",
+      "reason": "no-hosted-runner",
+      "runner": "fixture-windows-arm64",
+      "steps": {
+        "install": "not-run",
+        "uninstall": "not-run",
+        "validate": "not-run",
+        "version": "not-run"
+      }
+    }
+  ],
+  "run": {
+    "attempt": 1,
+    "id": 40,
+    "url": "https://github.com/darkquasar/homebrew-tap/actions/runs/40/attempts/1"
+  },
+  "schema_version": 1,
+  "snapshot_digest": "8922df463a7fde802e931ab756b3aa187c41e6078e7e984ed7e7ebc79a63a869",
+  "version": "2.7.1"
+}

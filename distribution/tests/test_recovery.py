@@ -12,6 +12,7 @@ from distribution.contracts import CONTROL_REPOSITORY, canonical_digest
 from distribution.state import encode, file_digest
 from distribution.validation import render
 from test_controller import Credentials, EvidenceGitHub, LocalGit, native_success
+from test_bottles import archive, checked, members, recorded_snapshot
 from test_renderers import fixture
 from test_contracts import approve
 
@@ -36,7 +37,7 @@ class RecoveryTests(unittest.TestCase):
             tip=gh.branch_tip(CONTROL_REPOSITORY,'main')
             path='.distribution/status/patronus/2.7.1.json'
             gh.cas(CONTROL_REPOSITORY,'main',tip,{path:b'{malformed cache'})
-            result=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            result=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             self.assertEqual(result['state'],'complete')
             status=gh.status_cache(gh.registration,'2.7.1')
             self.assertEqual(status['channels']['scoop']['state'],'published')
@@ -60,12 +61,12 @@ class RecoveryTests(unittest.TestCase):
                     raise RefOutcomeUnknown(repo,branch,commit)
                 return commit
             gh.cas=cas
-            first=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            first=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             observed=first['channels']['scoop']
             self.assertEqual(observed['state'],'unknown')
             tip=gh.branch_tip('darkquasar/scoop-bucket','main')
             self.assertEqual(observed['refs']['candidate_commit'],tip)
-            second=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            second=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             self.assertEqual(second['channels']['scoop']['state'],'published')
             self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'),tip)
 
@@ -82,7 +83,7 @@ class RecoveryTests(unittest.TestCase):
             gh.env='package-publisher'
             gh.init('darkquasar/scoop-bucket')
             with patch('distribution.validation.subprocess.run',side_effect=native_success):
-                result=controller.publish(gh.registration,ref,gh,PerRepositoryCredentials(),channels=['brew','scoop'])
+                result=controller.publish(gh.registration,ref,gh,PerRepositoryCredentials(),channels=['brew','scoop'],**checked(gh,ref))
             self.assertEqual(result['channels']['brew']['state'],'published')
             self.assertEqual(result['channels']['scoop']['state'],'failed')
             self.assertNotIn('bucket/patronus.json',gh.tree('darkquasar/scoop-bucket',gh.branch_tip('darkquasar/scoop-bucket','main')))
@@ -94,8 +95,9 @@ class RecoveryTests(unittest.TestCase):
             gh.context['role']='publish'
             gh.env='package-publisher'
             gh.init('darkquasar/scoop-bucket')
+            inputs=checked(gh,ref)
             with patch('yaml.safe_dump',side_effect=ValueError('invented serializer failure')):
-                result=controller.publish(gh.registration,ref,gh,Credentials(),channels=['winget','scoop'])
+                result=controller.publish(gh.registration,ref,gh,Credentials(),channels=['winget','scoop'],**inputs)
             self.assertEqual(result['state'],'partial-failure')
             self.assertEqual(result['channels']['winget']['failure_code'],'validation-failed')
             self.assertEqual(result['channels']['scoop']['state'],'published')
@@ -129,7 +131,7 @@ class RecoveryTests(unittest.TestCase):
             gh.context['role']='publish'
             gh.env='package-publisher'
             gh.init('darkquasar/scoop-bucket')
-            first=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            first=controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             corrected=copy.deepcopy(gh.registration)
             corrected['configuration']['description']='New approved package metadata'
             gh.registration=approve(corrected)
@@ -143,7 +145,7 @@ class RecoveryTests(unittest.TestCase):
             retry_ref=controller.authority(gh.registration,{'version':'2.7.1'},gh,Credentials())['record_ref']
             gh.context['role']='publish'
             gh.env='package-publisher'
-            second=controller.publish(gh.registration,retry_ref,gh,Credentials(),channels=['scoop'])
+            second=controller.publish(gh.registration,retry_ref,gh,Credentials(),channels=['scoop'],**checked(gh,retry_ref))
             self.assertEqual(second['channels']['scoop']['state'],'published')
             self.assertEqual(second['channels']['scoop']['configuration_digest'],gh.registration['configuration_digest'])
             self.assertNotEqual(first['channels']['scoop']['definition_digest'],second['channels']['scoop']['definition_digest'])
@@ -227,19 +229,19 @@ class RecoveryTests(unittest.TestCase):
             gh.init('darkquasar/scoop-bucket')
             gh.denied.add('darkquasar/scoop-bucket')
             with patch('distribution.validation.subprocess.run',side_effect=native_success):
-                first = controller.publish(gh.registration,ref,gh,Credentials(),channels=['brew','scoop'])
+                first = controller.publish(gh.registration,ref,gh,Credentials(),channels=['brew','scoop'],**checked(gh,ref))
             self.assertEqual(first['state'],'partial-failure')
             self.assertEqual(first['channels']['brew']['state'],'published')
             self.assertEqual(first['channels']['scoop']['state'],'failed')
             formula = gh.tree(CONTROL_REPOSITORY,gh.branch_tip(CONTROL_REPOSITORY,'main'))['Formula/patronus.rb']['content']
             gh.denied.clear()
             gh.denied.add(CONTROL_REPOSITORY)  # Crash/storage loss after destination push.
-            second = controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            second = controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             self.assertEqual(second['state'],'partial-failure')
             self.assertEqual(second['channels']['scoop']['state'],'published')
             tip = gh.branch_tip('darkquasar/scoop-bucket','main')
             gh.denied.clear()
-            third = controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            third = controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             self.assertEqual(third['state'],'complete')
             self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'),tip)
             tree = gh.tree(CONTROL_REPOSITORY,gh.branch_tip(CONTROL_REPOSITORY,'main'))
@@ -261,3 +263,216 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 controller.apply_channel('scoop',reg,snap,render('scoop',reg,snap),gh)
             self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'),tip)
+
+
+def publisher(directory):
+    gh = EvidenceGitHub(directory)
+    ref = controller.authority(gh.registration,{'run_id':50,'attempt':1},gh,Credentials())['record_ref']
+    gh.context['role'] = 'publish'
+    gh.env = 'package-publisher'
+    gh.init('darkquasar/scoop-bucket')
+    gh._service()
+    return gh, ref
+
+
+def second_run(gh, directory, run_id):
+    """Another publisher run for the same app/version sharing the same external services."""
+    from pathlib import Path
+    other = copy.copy(gh)
+    other.root = Path(directory)/f'run-{run_id}'
+    other.root.mkdir()
+    other.context = dict(gh.context, run_id=run_id)
+    other.controller_run = dict(gh.controller_run, id=run_id)
+    return other
+
+
+def run_publish(gh, ref, inputs, channels=('brew',)):
+    return controller.publish(gh.registration,ref,gh,Credentials(),channels=list(channels),**inputs)
+
+
+class BottleRaceTests(unittest.TestCase):
+    def test_two_publishers_one_version_one_release_and_the_loser_retries_onto_the_winner(self):
+        from distribution.bottles import select_bottles
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'distribution.validation.subprocess.run',side_effect=native_success):
+            a, ref = publisher(directory)
+            b = second_run(a, directory, 41)
+            inputs_a, inputs_b = checked(a,ref,salt='run-40'), checked(b,ref,salt='run-41')
+            self.assertFalse(set(inputs_a['archives'].values()) & set(inputs_b['archives'].values()))
+            service = a.releases_service
+            paused, go = threading.Event(), threading.Event()
+            def pause(run_id, release_id):
+                if run_id == 40 and not go.is_set():
+                    paused.set()
+                    self.assertTrue(go.wait(30))
+            service.before_publish = pause
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(run_publish, a, ref, inputs_a)
+                self.assertTrue(paused.wait(30))
+                self.assertEqual(service.ops('draft-read', run=40)[-1][1], 'draft-read')
+                won = run_publish(b, ref, inputs_b)
+                go.set()
+                lost = pending.result(timeout=60)
+            self.assertEqual(won['channels']['brew']['state'],'published')
+            self.assertEqual(lost['channels']['brew']['state'],'failed')
+            self.assertEqual(lost['channels']['brew']['failure_code'],'bottle-race')
+            published = [r for r in service.releases.values() if not r['draft']]
+            self.assertEqual(len(published),1)
+            self.assertEqual(published[0]['assets'],inputs_b['archives'])
+            winner = published[0]['id']
+            self.assertEqual(published[0]['creator'],41)
+            self.assertTrue({e[1] for e in service.log if e[0] == 40 and e[2] == winner} <= {'read','download'})
+            own = {e[2] for e in service.ops('create',run=40)}
+            self.assertEqual(len(own),1)
+            self.assertFalse(own & set(service.releases))
+            self.assertFalse([e for e in service.ops('cas',run=40) if 'Formula/patronus.rb' in e[3]])
+            snap = recorded_snapshot(a,ref)
+            formula = render('brew',a.registration,snap,inputs_b['evidence']['brew']['bottle_set'])
+            tree = a.tree(CONTROL_REPOSITORY,a.branch_tip(CONTROL_REPOSITORY,'main'))
+            self.assertEqual(tree['Formula/patronus.rb']['content'],formula['Formula/patronus.rb'])
+            selected = select_bottles(a.registration,snap,a)
+            self.assertEqual(selected['bottle_set'],inputs_b['evidence']['brew']['bottle_set'])
+            before = len(service.log)
+            retry = run_publish(a, ref, checked(a,ref,selected=selected))
+            self.assertEqual(retry['channels']['brew']['state'],'published')
+            self.assertEqual(retry['channels']['brew']['bottle_set_sha256'],
+                             canonical_digest(inputs_b['evidence']['brew']['bottle_set']))
+            self.assertFalse([e for e in service.log[before:] if e[1] in {'create','upload','publish','delete'}])
+            self.assertEqual(len([r for r in service.releases.values() if not r['draft']]),1)
+
+
+class BottleEvidenceBindingTests(unittest.TestCase):
+    """Anything substituted after the native checks blocks every release and formula write."""
+    def assert_blocked(self, gh, output):
+        brew = output['channels']['brew']
+        self.assertEqual(brew['state'],'failed')
+        self.assertEqual(brew['failure_code'],'native-check-failed')
+        self.assertFalse(gh.releases_service.ops('create','upload','publish','delete'))
+        self.assertNotIn('Formula/patronus.rb',gh.tree(CONTROL_REPOSITORY,gh.branch_tip(CONTROL_REPOSITORY,'main')))
+
+    def test_substituted_archive_tag_hash_or_formula_field_blocks_the_formula_write(self):
+        import hashlib
+        for change in ['archive','tag-hash','formula-identity','result-binding']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory, patch(
+                    'distribution.validation.subprocess.run',side_effect=native_success):
+                gh, ref = publisher(directory)
+                inputs = checked(gh,ref)
+                rebuilt = checked(gh,ref,salt='substitute')['archives']
+                name = 'patronus-2.7.1.sequoia.bottle.tar.gz'
+                brew = inputs['evidence']['brew']
+                if change == 'archive':
+                    inputs['archives'][name] = rebuilt[name]
+                elif change == 'tag-hash':
+                    inputs['archives'][name] = rebuilt[name]
+                    brew['bottle_set']['tags']['sequoia'] = hashlib.sha256(rebuilt[name]).hexdigest()
+                elif change == 'formula-identity':
+                    brew['identity']['formula_sha256'] = 'f'*64
+                    for entry in inputs['evidence']['results']:
+                        if entry['manager'] == 'brew':
+                            entry['binding'] = 'f'*64
+                else:
+                    entry = next(e for e in inputs['evidence']['results'] if e['platform'] == 'darwin-amd64')
+                    entry['binding'] = 'e'*64
+                output = run_publish(gh,ref,inputs,channels=('brew','scoop'))
+                self.assert_blocked(gh,output)
+                self.assertEqual(output['channels']['scoop']['state'],'published')
+
+    def test_changed_registration_after_checks_blocks_bottle_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = publisher(directory)
+            inputs = checked(gh,ref)
+            snap = recorded_snapshot(gh,ref)
+            corrected = copy.deepcopy(gh.registration)
+            corrected['configuration']['description'] = 'Changed after the native checks'
+            corrected = approve(corrected)
+            result = controller.apply_bottles(corrected,snap,inputs['evidence']['brew']['bottle_set'],
+                                              inputs['archives'],inputs['evidence'],gh)
+            self.assertEqual(result['state'],'failed')
+            self.assertEqual(result['failure_code'],'native-check-failed')
+            self.assertFalse(gh.releases_service.ops('create','upload','publish'))
+
+
+class NativeGateTests(unittest.TestCase):
+    """Scoop/WinGet publish or prepare only definitions hosted checks passed (PD-17)."""
+    def outcome(self, mutate, channels=('scoop','winget')):
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = publisher(directory)
+            inputs = checked(gh,ref)
+            mutate(inputs)
+            tip = gh.branch_tip('darkquasar/scoop-bucket','main')
+            output = run_publish(gh,ref,inputs,channels=channels)
+            if output['channels']['scoop']['failure_code'] == 'native-check-failed':
+                self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'),tip)
+            return output['channels']
+
+    def result(self, inputs, manager, platform):
+        return next(e for e in inputs['evidence']['results'] if e['manager'] == manager and e['platform'] == platform)
+
+    def test_missing_failed_or_rebound_evidence_fails_the_channel_with_platforms(self):
+        def missing(inputs):
+            inputs['evidence'] = None
+        def failed_amd64(inputs):
+            entry = self.result(inputs,'scoop','windows-amd64')
+            entry.update(outcome='failed',reason='version mismatch',steps=dict(entry['steps'],version='failed'))
+        def other_candidate(inputs):
+            inputs['evidence']['candidates']['scoop'] = 'f'*64
+            for e in inputs['evidence']['results']:
+                if e['manager'] == 'scoop':
+                    e['binding'] = 'f'*64
+        def rebound_result(inputs):
+            self.result(inputs,'winget','windows-arm64')['binding'] = 'f'*64
+        def missing_arm64(inputs):
+            inputs['evidence']['results'].remove(self.result(inputs,'scoop','windows-arm64'))
+        def wrong_static_reason(inputs):
+            entry = self.result(inputs,'scoop','windows-arm64')
+            entry.update(outcome='statically-mapped',reason='runner-busy',
+                         steps={k:'not-run' for k in entry['steps']})
+        def static_amd64(inputs):
+            entry = self.result(inputs,'scoop','windows-amd64')
+            entry.update(outcome='statically-mapped',reason='no-hosted-runner',
+                         steps={k:'not-run' for k in entry['steps']})
+        cases = [(missing,{'scoop','winget'},'native-checks.json missing'),
+                 (failed_amd64,{'scoop'},'windows-amd64'),
+                 (other_candidate,{'scoop'},'different candidate digest'),
+                 (rebound_result,{'winget'},'windows-arm64'),
+                 (missing_arm64,{'scoop'},'windows-arm64: missing'),
+                 (wrong_static_reason,{'scoop'},'windows-arm64'),
+                 (static_amd64,{'scoop'},'windows-amd64')]
+        for mutate, failing, text in cases:
+            with self.subTest(case=mutate.__name__):
+                channels = self.outcome(mutate)
+                for channel in ['scoop','winget']:
+                    native = channels[channel]['failure_code'] == 'native-check-failed'
+                    self.assertEqual(native, channel in failing, (channel, channels[channel]))
+                    if native:
+                        self.assertIn(text,' '.join(channels[channel]['failing_platforms']))
+                        self.assertIn(text,channels[channel]['message'])
+
+    def test_arm64_statically_mapped_for_no_hosted_runner_is_accepted(self):
+        def static(inputs):
+            for manager in ['scoop','winget']:
+                entry = self.result(inputs,manager,'windows-arm64')
+                entry.update(outcome='statically-mapped',reason='no-hosted-runner',
+                             steps={k:'not-run' for k in entry['steps']})
+        channels = self.outcome(static)
+        self.assertEqual(channels['scoop']['state'],'published')
+        self.assertNotEqual(channels['winget']['failure_code'],'native-check-failed')
+        self.assertIn('native_checks',channels['scoop'])
+
+    def test_malformed_foreign_or_other_run_evidence_fails_every_channel(self):
+        def unknown_field(inputs):
+            inputs['evidence']['extra'] = True
+        def unknown_result_field(inputs):
+            inputs['evidence']['results'][0]['note'] = 'x'
+        def other_run(inputs):
+            inputs['evidence']['run'] = dict(id=39,attempt=1,
+                url='https://github.com/darkquasar/homebrew-tap/actions/runs/39/attempts/1')
+        def other_snapshot(inputs):
+            inputs['evidence']['snapshot_digest'] = 'f'*64
+        def passed_with_failed_step(inputs):
+            self.result(inputs,'scoop','windows-amd64')['steps']['uninstall'] = 'failed'
+        for mutate in [unknown_field,unknown_result_field,other_run,other_snapshot,passed_with_failed_step]:
+            with self.subTest(case=mutate.__name__):
+                channels = self.outcome(mutate,channels=('brew','scoop','winget'))
+                for channel in ['brew','scoop','winget']:
+                    self.assertEqual(channels[channel]['failure_code'],'native-check-failed',(channel,channels[channel]))

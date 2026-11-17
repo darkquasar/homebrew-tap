@@ -173,6 +173,54 @@ class Renderers(unittest.TestCase):
         locale = next(yaml.safe_load(data) for path, data in winget.items() if '.locale.' in path)
         self.assertEqual(locale['ShortDescription'], hostile)
 
+    def test_bottled_formula_places_merge_ordered_block_before_platform_blocks(self):
+        from test_bottles import bottle_kit
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        _archives, _verified, bottles = bottle_kit(reg, snap)
+        bottled = render('brew', reg, snap, bottles)
+        self.assertEqual(bottled, render('brew', reg, snap, copy.deepcopy(bottles)))
+        text = bottled['Formula/patronus.rb'].decode()
+        tags = bottles['tags']
+        block = ('  license "GPL-3.0-only"\n\n  bottle do\n'
+                 f'    root_url "{bottles["root_url"]}"\n'
+                 f'    sha256 cellar: :any_skip_relocation, arm64_sequoia: "{tags["arm64_sequoia"]}"\n'
+                 f'    sha256 cellar: :any_skip_relocation, sequoia:       "{tags["sequoia"]}"\n'
+                 f'    sha256 cellar: :any_skip_relocation, arm64_linux:   "{tags["arm64_linux"]}"\n'
+                 f'    sha256 cellar: :any_skip_relocation, x86_64_linux:  "{tags["x86_64_linux"]}"\n'
+                 '  end\n\n  on_macos do\n')
+        self.assertIn(block, text)
+        unbottled = render('brew', reg, snap)['Formula/patronus.rb'].decode()
+        self.assertEqual(text.replace(block, '  license "GPL-3.0-only"\n\n  on_macos do\n'), unbottled)
+        for channel in ['scoop', 'winget']:
+            with self.subTest(channel=channel), self.assertRaises(ValueError):
+                render(channel, reg, snap, bottles)
+
+    def test_bottled_formula_round_trips_and_rejects_set_or_byte_mismatch(self):
+        from unittest.mock import patch
+        from distribution.validation import validate_candidate
+        from test_bottles import bottle_kit
+        import test_validation
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        _archives, _verified, bottles = bottle_kit(reg, snap)
+        candidate = render('brew', reg, snap, bottles)
+        native = test_validation.Validation.native_success
+        with patch('distribution.validation.subprocess.run', side_effect=native):
+            result = validate_candidate('brew', reg, snap, candidate, bottles)
+            self.assertTrue(result['passed'], result['errors'])
+            self.assertEqual(result['bottle_set_sha256'], canonical_digest(bottles))
+            self.assertFalse(validate_candidate('brew', reg, snap, candidate)['passed'])
+            self.assertFalse(validate_candidate('brew', reg, snap, render('brew', reg, snap), bottles)['passed'])
+            other = copy.deepcopy(bottles)
+            other['tags']['sequoia'] = 'f' * 64
+            self.assertFalse(validate_candidate('brew', reg, snap, candidate, other)['passed'])
+            for change in [dict(cellar='any'), dict(release_tag='lumen-2.7.1'), dict(extra=True)]:
+                with self.subTest(change=change):
+                    bad = dict(bottles, **change)
+                    self.assertFalse(validate_candidate('brew', reg, snap, candidate, bad)['passed'])
+            unbottled = validate_candidate('brew', reg, snap, render('brew', reg, snap))
+            self.assertTrue(unbottled['passed'], unbottled['errors'])
+            self.assertIsNone(unbottled['bottle_set_sha256'])
+
     def test_staging_uses_two_independent_repositories_versions_and_frozen_bytes(self):
         identities = []
         with tempfile.TemporaryDirectory() as directory:
