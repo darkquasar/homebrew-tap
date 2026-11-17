@@ -433,7 +433,10 @@ function Invoke-Lifecycle([string]$WinGet) {
     $null = Scoop 'life-scoop-install' @('install',"darkquasar/$app",'--arch',$scoopArch,'--no-update-scoop')
     $fresh = Get-Fresh 'scoop' 'life-installed' $older.Sha256; Assert-Resolved $fresh $older; Test-Preservation 'scoop-installed'
     Add-Stage $stages 'installed' "scoop install darkquasar/$app" $fresh
-    Copy-Item "$Work/inputs/current/staging/scoop/bucket/$app.json" "$bucket/bucket/$app.json" -Force
+    # Write fresh bytes (new timestamp): Copy-Item keeps the source time, and an equal size and
+    # time let Git's index treat the newer manifest as unchanged.
+    [IO.File]::WriteAllBytes("$bucket\bucket\$app.json",
+        [IO.File]::ReadAllBytes("$Work\inputs\current\staging\scoop\bucket\$app.json"))
     $null = Invoke-Native -Step 'bucket-advance' -File 'git.exe' -Arguments @('-C',$bucket,'-c','user.name=Native Fixture',
         '-c','user.email=fixture@example.invalid','commit','-am','Advance staging bucket to the newer candidate')
     # Keep the pinned Scoop core if `scoop update <app>` decides Scoop is outdated.
