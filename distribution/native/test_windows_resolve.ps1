@@ -49,6 +49,7 @@ foreach ($case in $cases) {
     $base = Join-Path $root "probe-$($case.manager)"
     foreach ($expected in @('', ('0' * 64))) {
         $label = if ($expected) { 'a different expected digest' } else { 'no expected digest (removal probe)' }
+        Remove-Item $env:PROBE_MARKER -ErrorAction SilentlyContinue
         $result = Resolve-NativeCommand -Manager $case.manager -Command 'leftover' -Identifier 'darkquasar.Leftover' `
             -ExpectedSha $expected -OutputBase $base
         Check "$($case.manager): leftover is found with $label" ([bool]$result.found)

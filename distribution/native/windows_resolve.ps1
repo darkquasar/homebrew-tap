@@ -4,7 +4,8 @@
 
 function Test-VersionToken([string]$Output, [string]$Version) {
     # `v<version>` as a whole token: v2.7.1 matches; v2.7.10, v2.7.1-rc1 and v2.7.0 do not.
-    return "$Output".Contains("v$Version")
+    $pattern = '(?<![0-9A-Za-z.+-])v' + [regex]::Escape($Version) + '(?![0-9A-Za-z.+-])'
+    return [regex]::IsMatch("$Output", $pattern)
 }
 
 function Resolve-NativeCommand {
@@ -58,7 +59,7 @@ function Resolve-NativeCommand {
     }
     # Only the host architecture's snapshot asset ever runs: a foreign or leftover executable
     # is recorded, never started (it could also block a non-interactive session on a dialog).
-    if ((!$ExpectedSha -or $result.sha256 -eq $ExpectedSha) -and $result.mechanism -ne 'unexpected') {
+    if ($ExpectedSha -and $result.mechanism -ne 'unexpected' -and $result.sha256 -eq $ExpectedSha) {
         $process = Start-Process -FilePath $resolved.Source -ArgumentList '--version' -NoNewWindow -PassThru `
             -RedirectStandardOutput "$OutputBase.out" -RedirectStandardError "$OutputBase.err"
         if (!$process.WaitForExit(60000)) { $process.Kill(); throw "$Command --version exceeded 60 seconds" }
