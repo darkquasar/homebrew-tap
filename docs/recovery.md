@@ -22,12 +22,17 @@ gh run download "$controller_run" --repo darkquasar/homebrew-tap \
   --name "distribution-publish-$controller_run-$controller_attempt" --dir "$recovery_dir/publish"
 gh run download "$controller_run" --repo darkquasar/homebrew-tap \
   --name "winget-source-$controller_run-$controller_attempt" --dir "$recovery_dir/source"
+gh run download "$controller_run" --repo darkquasar/homebrew-tap \
+  --name native-checks --dir "$recovery_dir/native"
 ```
 
 Set the run/attempt to the exact affected run and `recovery_dir` to a fresh owner
 work directory outside checkouts. Some artifacts/jobs may be absent; record
-that as missing evidence. Authority/publish results have channel failures and
-`storage_errors` even when destination writes succeeded. A `write-outcome-unknown`
+that as missing evidence. The `native-checks` artifact holds that run's
+`native-checks.json`; per-platform logs are in `native-bottle-<platform>`,
+`native-brew-check-<platform>` and `native-windows-<platform>`.
+Authority/publish results have channel failures and `storage_errors` even when
+destination writes succeeded. A `write-outcome-unknown`
 result retains candidate commit/ref information; read back before retrying.
 Never post private keys/tokens in an incident note.
 
@@ -124,6 +129,75 @@ corrected channel; original snapshot authorization/configuration audit stays
 unchanged. Source/native identity/destination changes cannot reinterpret an old
 snapshot. Revalidate exact candidate bytes before writes; do not edit generated
 files as an unrecorded bypass.
+
+## Bottle and native-check failures
+
+**PENDING the first bottled release.** Every release run checks each channel on
+hosted runners before it publishes (PD-17), and Brew publishes only a bottled
+formula whose four bottles are durable on tap release `<app>-<version>`
+(PD-16). Each channel result carries `native_checks` (`run` and `digest` of the
+run's `native-checks.json`). A failure stops only its channel: the previous
+formula, bottles or manifest stay in place, and the other channels proceed.
+
+| Failure code | Meaning | Recovery |
+|---|---|---|
+| `native-check-failed` | A platform's validate, install, version or uninstall step failed, its result was missing, or `native-checks.json` was missing, invalid or bound to another run, snapshot or candidate. `failing_platforms` names each platform and reason. | Read `native-checks.json` and that platform's artifact. Repair the cause (runner outage, client change, harness defect through a reviewed control commit), then start a fresh retry for that channel. |
+| `bottle-conflict` | A published bottle or release differs from the frozen identity: an executable digest that is not the snapshot asset, a missing, extra or substituted asset, or a public read-back mismatch. | **Stop.** The release is never replaced or deleted to make a retry pass. Capture the state, verify the assets offline (below) and return to the owner. A defective binary needs a new owner-authorized version. |
+| `bottle-race` | Another run published the `<app>-<version>` tag first. This run wrote no formula and deleted its own draft (the message says if the draft was retained). | Start a fresh `channel=brew` retry. It selects the winner's published set, checks it on every platform and publishes the formula. |
+| `bottle-invalid` | A bottle archive or bottle set failed structure checks (members, links, size, tag, root URL). | Read the result message and the `native-bottle-<platform>` log. This is a packaging or harness defect; fix it through a reviewed control commit, then a fresh retry. |
+| `bottles-required` | Brew was asked to publish without a published bottle set. An unbottled formula is never published. | Find why the run supplied no bottle set (usually missing native evidence), then a fresh retry. |
+| `destination-unavailable` | A release write or the public read-back failed. Any complete release that was published is kept. | Fresh retry; it reuses that release. |
+
+Start the retry as a **new** dispatch, as in [Retry one selected channel](#retry-one-selected-channel),
+for example `-f channel=brew`. The retry's own `native-checks` job reruns the
+whole matrix in that run, and the publisher accepts native evidence only from
+its own workflow run. Published bottles are selected, not rebuilt. A crash
+after the bottle release was published but before the formula commit leaves the
+previous formula selected; the retry reuses that release (bottles need not be
+byte-reproducible) and then commits the formula.
+
+To check a published bottle against the frozen snapshot without credentials,
+run the offline seam from a `distribution-control` checkout with the hash-locked
+`distribution/validation-requirements.txt` installed. Use the protected snapshot
+read above and the registration from the control branch:
+
+```sh
+gh api "repos/darkquasar/homebrew-tap/contents/.distribution/registrations/patronus.json?ref=distribution-control" \
+  --jq .content | base64 --decode > "$recovery_dir/registration.json"
+gh release download patronus-2.7.1 --repo darkquasar/homebrew-tap \
+  --pattern 'patronus-2.7.1.arm64_sequoia.bottle.tar.gz' --dir "$recovery_dir/bottles"
+python3 -B -m distribution.cli verify-bottle \
+  --archive "$recovery_dir/bottles/patronus-2.7.1.arm64_sequoia.bottle.tar.gz" \
+  --tag arm64_sequoia --registration "$recovery_dir/registration.json" \
+  --snapshot "$recovery_dir/protected-snapshot.json" --out "$recovery_dir/verify-arm64_sequoia.json"
+```
+
+Repeat for tags `sequoia`, `x86_64_linux` and `arm64_linux`. The exit status
+is 0 when the bottle verifies, 1 when the registration or snapshot cannot be
+read or is invalid (`InputInvalid`), 2 for `BottleInvalid` (unreadable archive,
+unsafe or unexpected member, unsupported tag) and 3 for `BottleConflict` (the
+executable is not this platform's snapshot asset). The command writes its
+result JSON to `--out` and standard output; an error names the member or
+digest. It never extracts or runs the archive and grants nothing.
+
+A run that lost the response to its draft-creation request, or failed to clean
+up after an error, may leave an unpublished draft. Publishers never edit,
+publish or delete a draft they did not create, so these stay until the owner
+removes them. First confirm no `distribute.yml` run is queued or in progress,
+then list drafts and delete one only by its ID after confirming `draft` is
+`true`:
+
+```sh
+gh run list --repo darkquasar/homebrew-tap --workflow distribute.yml --status in_progress
+gh run list --repo darkquasar/homebrew-tap --workflow distribute.yml --status queued
+gh api repos/darkquasar/homebrew-tap/releases --paginate \
+  --jq '.[] | select(.draft) | {id, tag_name, created_at, body}'
+gh api "repos/darkquasar/homebrew-tap/releases/$draft_id" --jq '{id, draft, tag_name}'
+gh api --method DELETE "repos/darkquasar/homebrew-tap/releases/$draft_id"
+```
+
+Never delete by tag name (`gh release delete`), which can select the published
+release. Deleting a draft needs a separate owner grant; this runbook grants none.
 
 ## WinGet feedback, fork sync and source uncertainty
 
