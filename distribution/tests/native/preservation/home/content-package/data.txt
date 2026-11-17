@@ -1,0 +1,1 @@
+Invented home content-package data; preserve on executable removal.

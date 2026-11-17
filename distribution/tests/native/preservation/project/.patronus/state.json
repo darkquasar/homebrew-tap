@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "artifact": "invented-preservation",
+      "itemVersion": "0.0.1",
+      "type": "skill",
+      "tool": "claude",
+      "scope": "local",
+      "files": [
+        {
+          "path": ".claude/skills/invented-preservation/SKILL.md",
+          "action": "CREATE",
+          "checksum": "c839075c77873a64fce834e77e2dc673d61ec60fb201cda18f9af21c504b7866"
+        }
+      ]
+    }
+  ]
+}

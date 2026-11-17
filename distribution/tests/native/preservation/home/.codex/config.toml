@@ -1,0 +1,2 @@
+# Invented preservation sentinel; never load during this procedure.
+model_reasoning_effort = "medium"
