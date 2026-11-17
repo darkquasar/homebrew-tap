@@ -26,16 +26,21 @@ Neither check is publication. A WinGet install from local manifests is evidence
 for the definitions only, not default-source availability.
 
 ```text
-+------------------+  => render, stage   +--------------------+  => install, version,
-| native-checks.yml| ==================> | hosted runners x6  |     uninstall
-+------------------+                     +--------------------+
-         |  ~> label native-lifecycle               | ~> reports
-         v                                          v
-+------------------+  ~> lifecycle.json  +--------------------+
-| lifecycle jobs   | ~~~~~~~~~~~~~~~~~~> | native-checks.json |
-| [macOS, Windows] |   (own artifacts)   | [summary artifact] |
-+------------------+                     +--------------------+
++-------------------+  ~> platform reports  +---------------------+
+| Per-release [CI]  | ~~~~~~~~~~~~~~~~~~~~> | native-checks.json  |
+| hosted runners x6 |                       | [summary artifact]  |
++-------------------+                       +---------------------+
+
++-------------------+  ~> lifecycle records +---------------------+
+| Lifecycle [CI]    | ~~~~~~~~~~~~~~~~~~~~> | Lifecycle artifacts |
+| native-lifecycle  |                       | [separate, not in   |
+| label only        |                       |  native-checks.json]|
++-------------------+                       +---------------------+
 ```
+
+The summary job reads only the build and check reports. A passing
+`native-checks.json` is not lifecycle evidence; lifecycle results live only in
+their own artifacts.
 
 ## Per-release matrix
 
@@ -55,7 +60,12 @@ Developer Mode off. An executable runs only after its SHA-256 equals the host
 architecture's snapshot asset, and `--version` must report `v<version>` as a
 whole token. Runner labels live in `distribution/native/pins.json`; a platform
 listed there as statically mapped is recorded `statically-mapped`
-(`no-hosted-runner`), never as tested. Currently all six labels run.
+(`no-hosted-runner`), never as tested. That record does not generally satisfy
+the publisher's gate (`bottles.native_failures`): it is accepted only for
+`windows-arm64` with reason `no-hosted-runner`. Every Brew platform and
+`windows-amd64` must pass, so retiring one of their runner labels blocks the
+affected channel until `pins.json` names a replacement. Currently all six labels
+run.
 
 In fixture mode, `render` builds a synthetic program for all six platforms at
 versions 2.7.0 and 2.7.1, freezes a fixture snapshot and serves the assets on

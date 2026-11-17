@@ -1,7 +1,11 @@
 # Distribution contracts (schema v1)
 
 This directory belongs on `distribution-control` in `darkquasar/homebrew-tap`.
-T1 supplies pure contracts and read-only trust checks. It does not deploy a
+Sections named after a milestone (T1, T3, T4) are historical: they record what
+that milestone delivered and left for later. The current Homebrew bottle and
+per-release native-check contracts (T6, T7) are in
+[Bottles and native evidence](#bottles-and-native-evidence).
+Historically, T1 supplied pure contracts and read-only trust checks. It does not deploy a
 workflow, create credentials, write a record or publish a package. The production
 GitHub adapter, CLI, CAS persistence and isolated jobs belong to T4. All fixtures
 are invented; their App IDs and approval references must never be registered live.
@@ -157,10 +161,10 @@ The [workflow-run attempt API](https://docs.github.com/en/rest/actions/workflow-
 and a read-only observation of Patronus run 40148694836 informed this contract;
 that observation is not approval of the old release or evidence of T2 dispatch.
 
-## Tests and remaining integration
+## Tests and remaining integration (historical, T1)
 
 Run `python3 -B -m unittest discover -s distribution/tests -p 'test_*.py'`.
-T1 uses public-function test-first slices for ownership, authority and identity,
+The paragraphs below are the T1 handoff as written. T1 uses public-function test-first slices for ownership, authority and identity,
 plus negative/legacy regressions. It reads no credentials and performs no live
 release download, publication, binary execution or native manager operation.
 
@@ -168,8 +172,121 @@ T4 must enforce native rules/environment protection, trusted job inputs, fresh
 inspection at baseline approval, create-only records/CAS, role-specific token
 lifetime, safe downloads, and independent isolated job execution. T2 must bind
 receipt upload to the real successful attempt and preserve non-fatal receipt-only
-failure policy. Native/ARM/package checks belong to later milestones. Those
+failure policy. At T1, native/ARM/package checks belonged to later milestones;
+T6 and T7 have since delivered them (see
+[Bottles and native evidence](#bottles-and-native-evidence)). Those
 requirements are not established by T1's invented API evidence.
+
+## Bottles and native evidence
+
+T6 added Homebrew bottles and the publisher's native gate; T7 added the
+unprivileged `native-checks.yml` workflow that produces the evidence. Workflow
+jobs, harness scripts and failure prefixes are described in
+[`native/README.md`](native/README.md); the CI procedure is in
+[`tests/native/README.md`](tests/native/README.md).
+
+### `bottles.py`
+
+Every function takes a validated registration and snapshot and fails closed.
+The first two exception classes separate structure from identity:
+
+| Class | Meaning |
+|---|---|
+| `BottleInvalid(ValueError)` | Structure: members, links, size, tag form, root URL or bottle_set shape. |
+| `BottleConflict(ValueError)` | Integrity: a bottled executable differs from the frozen snapshot asset (including another platform's asset), or a published release does not match. Never repaired by replacement. |
+| `NativeEvidenceInvalid(ValueError)` | `native-checks.json` fails schema v1. |
+
+| Function | Result / preconditions |
+|---|---|
+| `verify_bottle(archive, registration, snapshot, tag)` | Reads one archive (1 byte to `MAX_ARCHIVE`, 256 MiB, uncompressed at most `MAX_UNCOMPRESSED`) without extracting or running it. Allows only `<formula>/<version>/bin/<command>` plus optional `INSTALL_RECEIPT.json`, `.brew/<formula>.rb` and `sbom.spdx.json` and their parent directories. Rejects links, sparse, special or duplicate members, unsafe paths and trailing gzip data (`BottleInvalid`). Requires the executable's SHA-256 to equal the snapshot asset for the tag's platform (`BottleConflict`). Returns `tag`, `sha256`, `executable_sha256`, `asset` (remote filename) and `members`. |
+| `bottle_tag_platform(tag)` | `(system, cpu)` for `x86_64_linux`, `arm64_linux`, a pinned macOS name (Intel) or `arm64_<name>`; else `BottleInvalid`. |
+| `remote_filename(formula, version, tag)` | `<formula>-<version>.<tag>.bottle.tar.gz`, URL-encoded as Homebrew does for rebuild 0. |
+| `release_tag(configuration, identity)` / `canonical_root_url(...)` | `<app>-<version>` and `https://github.com/<tap>/releases/download/<app>-<version>`, the only tag and root URL an app may use. |
+| `bottle_set(registration, snapshot, verified, root_url)` | Assembles `verify_bottle` results into `{release_tag, root_url, cellar, tags}`, then `check_bottle_set`. |
+| `check_bottle_set(registration, snapshot, bottles)` | Exact fields, the app's own tag and canonical root URL, cellar `any_skip_relocation`, and exactly one tag per Brew platform (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`). |
+| `bottle_block(...)` / `ordered_tags(tags)` | The formula's `bottle do` block in Homebrew's tag order and alignment. `validation.render('brew', ..., bottles)` inserts it; `validation.validate_candidate(..., bottles)` requires exactly that block and reports `bottle_set_sha256`. |
+| `bottled_formula_identity(registration, snapshot, bottles)` | `formula_sha256`, `bottle_set_sha256`, `snapshot_digest`, `configuration_digest`: the identity native checks bind to and the publisher reproduces. |
+| `staging_formula(canonical, loopback_root_url)` | Replaces only the `root_url` line with a loopback URL for staging installs; any other change raises `ValueError`. |
+| `select_bottles(registration, snapshot, github)` | Unprivileged read of tap release `<app>-<version>`: `None` when unpublished; a complete release whose four assets verify is selected as is; anything else published is `BottleConflict`. |
+| `validate_native_checks(document)` | Strict schema v1 check (below); returns a copy. |
+| `native_failures(channel, registration, snapshot, evidence, binding, context, bottles)` | The failing platforms or evidence problems that stop one channel; an empty list passes the gate. |
+
+### `verify-bottle` (offline, credential-free)
+
+```sh
+python3 -B -m distribution.cli verify-bottle --archive FILE --tag TAG \
+  --registration REGISTRATION.json --snapshot SNAPSHOT.json --out RESULT.json
+```
+
+The result JSON goes to `--out` and standard output. Exit 0: verified. Exit 1:
+`InputInvalid`, the registration or snapshot cannot be read or is invalid.
+Exit 2: `BottleInvalid`, including an unreadable archive or unsupported tag.
+Exit 3: `BottleConflict`. Error JSON is `{"error": ..., "message": ...}` and
+names the member or digest. The `brew-build` jobs fail on any nonzero exit.
+
+### `native-checks.json` schema v1
+
+The `summary` job writes it and the publisher reads it. Unknown or missing
+fields are rejected at every level:
+
+- `schema_version` 1, `app`, `version`, `snapshot_digest`,
+  `configuration_digest`.
+- `candidates`: `scoop` and `winget` digests (`state.file_digest` of the
+  re-rendered candidate).
+- `brew`: `null` when no bottle set was selected or assembled, otherwise
+  `source` (`published` or `fresh`), `bottle_set` and `identity` (the
+  `bottled_formula_identity` fields).
+- `results`: at most 32 entries, one per manager and platform, each with
+  `manager`, `platform`, `outcome` (`passed`, `failed` or `statically-mapped`),
+  `reason`, `runner`, `image`, `image_version`, `manager_version`, `steps`
+  (`validate`, `install`, `version`, `uninstall`: `passed`, `failed`, `skipped`
+  or `not-run`) and `binding`. `passed` needs every step passed;
+  `statically-mapped` needs every step `not-run`.
+- `run`: `id`, `attempt` and
+  `url` = `https://github.com/darkquasar/homebrew-tap/actions/runs/<id>/attempts/<attempt>`.
+
+`native_failures` then checks the bindings:
+
+- App, version, snapshot digest and configuration digest equal the publisher's.
+- **Same run:** `run.id` equals the publisher's own workflow run and
+  `run.attempt` is at most its current attempt, so evidence from another run
+  cannot be replayed.
+- **Brew:** `brew` is not `null`, its `bottle_set` equals the set being
+  published, its `identity` equals the recomputed `bottled_formula_identity`,
+  and all four Brew platforms passed with `binding` equal to that
+  `formula_sha256`.
+- **Scoop and WinGet:** `candidates[channel]` equals the re-rendered digest,
+  `windows-amd64` passed, and `windows-arm64` passed or is `statically-mapped`
+  with reason `no-hosted-runner` (the only accepted static mapping), each bound
+  to that digest.
+- A missing result fails its platform.
+
+An example that passes all three gates is
+`tests/fixtures/bottles/native-checks.example.json`.
+
+### Publisher inputs and Brew's bottle requirement
+
+The publish job downloads its own run's `native-checks` and
+`native-brew-candidate` artifacts and sets:
+
+| Variable | Contents |
+|---|---|
+| `DISTRIBUTION_NATIVE_CHECKS` | Path to `native-checks.json`. Unset or unreadable means missing evidence: every channel fails closed with `native-check-failed`, and the result records `native_input_errors`. |
+| `DISTRIBUTION_BOTTLES_DIR` | Directory of regular files named `<app>-<version>.<tag>.bottle.tar.gz`, at most 8, each at most 256 MiB, no symlinks. Other names are ignored. A missing or differing archive fails Brew with `native-check-failed`. |
+
+`controller.publish(registration, record_ref, github, credentials, channels,
+*, evidence=None, archives=None)` treats both as untrusted and re-derives every
+binding. A channel whose gate fails returns `failed: native-check-failed` with
+`failing_platforms`; others proceed. Each channel result carries
+`native_checks` (`run` and canonical `digest` of the evidence). For Brew,
+`apply_bottles` re-verifies every archive, reuses a published set or publishes
+its own draft release, reads the assets back from their public URLs and only
+then returns the bottle set (failures: `native-check-failed`, `bottle-invalid`,
+`bottle-conflict`, `bottle-race`, `destination-unavailable`). `apply_channel('brew', ...)` without
+a bottle set returns `failed: bottles-required`: an unbottled formula is never
+published. The Brew marker and result gain `release_tag`, `bottle_set_sha256`
+and `bottles` (tag to SHA-256). Recovery for each code is in
+[`docs/recovery.md`](../docs/recovery.md#bottle-and-native-check-failures).
 
 ## T3 native candidate preflight
 

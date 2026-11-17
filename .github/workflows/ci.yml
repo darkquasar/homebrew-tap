@@ -2,7 +2,7 @@ name: distribution-ci
 
 on:
   pull_request:
-    # labeled: adding native-lifecycle or native-negative starts a run with those checks.
+    # labeled: adding native-lifecycle, native-negative or native-second-app starts a run with those checks.
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [distribution-control]

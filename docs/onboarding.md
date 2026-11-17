@@ -243,9 +243,14 @@ Candidates must first contain only the exact
 this command validates, it does not generate files. Keep result JSON outside
 the candidate root; mixed catalogue trees are rejected by this strict seam. Repeat
 with `brew` and `winget` using their matching candidate directories, and
-Patronus's matching fixture pair. Use
-[the native procedure](../distribution/tests/native/README.md) for discovery and
-preservation observations. Structural success is not authority or publication.
+Patronus's matching fixture pair. Native discovery and coexistence of a second
+app come from the tap PR label `native-second-app`, which runs the per-release
+matrix for Lumen while Patronus's staged entries share the tap and bucket.
+Preservation acceptance comes from the label `native-lifecycle`, which runs the
+one-time lifecycle for Patronus only; no Lumen lifecycle is claimed. See
+[PR labels](../distribution/tests/native/README.md#pr-labels) and
+[lifecycle acceptance](../distribution/tests/native/README.md#lifecycle-acceptance-pd-13).
+Structural success is not authority or publication.
 Do not push Lumen, create its remote repository/App or open its Microsoft PR.
 
 For a future real second app, the owner must approve its actual distinct
@@ -265,9 +270,23 @@ source/native identity/destination changes cannot reinterpret frozen history.
 Download the authority/publish artifacts for the exact run/attempt, retain control
 SHA, registration digest, `record_ref`, protected record commit/snapshot digest,
 channel definition digests/commits and WinGet `refs`. A selected-channel retry
-must use this same identity; see [recovery](recovery.md). Automatic validation
-uses actual Ruby/Homebrew style plus pinned Scoop/WinGet schemas. It is not a
-live native install. Missing validation/tool evidence blocks that channel.
+must use this same identity; see [recovery](recovery.md). Three kinds of
+evidence apply, and each stays distinct:
+
+| Evidence | Where | What it shows |
+|---|---|---|
+| Structural validation | Channel `validation` in the publish result | Actual Ruby/Homebrew style plus pinned Scoop/WinGet schemas; missing validation/tool evidence blocks that channel |
+| Hosted staging installation | The run's `native-checks` artifact (`native-checks.json`), referenced by each channel's `native_checks` (`run`, `digest`) | Install, `--version` and uninstall from a staging catalogue on every hosted platform before the channel writes |
+| Live-source availability | The status rows below | The package as users receive it; neither check above proves it |
+
+Also download the `native-checks` artifact for the run, for example
+`gh run download "$controller_run" --repo darkquasar/homebrew-tap --name native-checks`.
+A failed or missing native result stops only the affected channel with
+`failed: native-check-failed` and `failing_platforms`; its previous definition
+stays in place and the other channels proceed. That is a native install result,
+not a structural-validation failure. See the
+[native check procedure](../distribution/tests/native/README.md) and
+[recovery for bottle and native-check failures](recovery.md#bottle-and-native-check-failures).
 
 For a prepared WinGet branch, read the recorded upstream default/commit,
 `upstream_base`, `head`/`controller_prepared_head` and `compare_url`. The whole diff
