@@ -294,7 +294,7 @@ jobs:
         with:
           name: ${{ inputs.label }}-selection
           path: ${{ runner.temp }}/selection
-      - name: Verify four bottles and stage the bottled formula
+      - name: Verify three bottles and stage the bottled formula
         shell: bash
         env:
           SOURCE: ${{ needs.select.outputs.source }}

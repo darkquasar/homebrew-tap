@@ -184,7 +184,7 @@ def stage_candidates(out, registration, snapshot, *, loopback=None, assets=None,
 
 
 def stage_bottles(out, registration, snapshot, archives, *, source, loopback):
-    """Verify four archives, assemble the bottle_set and stage the bottled formula.
+    """Verify three archives, assemble the bottle_set and stage the bottled formula.
 
     Writes bottles/<remote filename>, canonical/brew (the publishable bottled
     formula), staging/brew (bottles.staging_formula with the loopback root that

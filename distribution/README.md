@@ -199,15 +199,15 @@ The first two exception classes separate structure from identity:
 | Function | Result / preconditions |
 |---|---|
 | `verify_bottle(archive, registration, snapshot, tag)` | Reads one archive (1 byte to `MAX_ARCHIVE`, 256 MiB, uncompressed at most `MAX_UNCOMPRESSED`) without extracting or running it. Allows only `<formula>/<version>/bin/<command>` plus optional `INSTALL_RECEIPT.json`, `.brew/<formula>.rb` and `sbom.spdx.json` and their parent directories. Rejects links, sparse, special or duplicate members, unsafe paths and trailing gzip data (`BottleInvalid`). Requires the executable's SHA-256 to equal the snapshot asset for the tag's platform (`BottleConflict`). Returns `tag`, `sha256`, `executable_sha256`, `asset` (remote filename) and `members`. |
-| `bottle_tag_platform(tag)` | `(system, cpu)` for `x86_64_linux`, `arm64_linux`, a pinned macOS name (Intel) or `arm64_<name>`; else `BottleInvalid`. |
+| `bottle_tag_platform(tag)` | `(system, cpu)` for `x86_64_linux`, `arm64_linux` or `arm64_<pinned macOS name>`; else `BottleInvalid` (Intel macOS is not bottled). |
 | `remote_filename(formula, version, tag)` | `<formula>-<version>.<tag>.bottle.tar.gz`, URL-encoded as Homebrew does for rebuild 0. |
 | `release_tag(configuration, identity)` / `canonical_root_url(...)` | `<app>-<version>` and `https://github.com/<tap>/releases/download/<app>-<version>`, the only tag and root URL an app may use. |
 | `bottle_set(registration, snapshot, verified, root_url)` | Assembles `verify_bottle` results into `{release_tag, root_url, cellar, tags}`, then `check_bottle_set`. |
-| `check_bottle_set(registration, snapshot, bottles)` | Exact fields, the app's own tag and canonical root URL, cellar `any_skip_relocation`, and exactly one tag per Brew platform (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`). |
+| `check_bottle_set(registration, snapshot, bottles)` | Exact fields, the app's own tag and canonical root URL, cellar `any_skip_relocation`, and exactly one tag per Brew platform (`darwin-arm64`, `linux-amd64`, `linux-arm64`). |
 | `bottle_block(...)` / `ordered_tags(tags)` | The formula's `bottle do` block in Homebrew's tag order and alignment. `validation.render('brew', ..., bottles)` inserts it; `validation.validate_candidate(..., bottles)` requires exactly that block and reports `bottle_set_sha256`. |
 | `bottled_formula_identity(registration, snapshot, bottles)` | `formula_sha256`, `bottle_set_sha256`, `snapshot_digest`, `configuration_digest`: the identity native checks bind to and the publisher reproduces. |
 | `staging_formula(canonical, loopback_root_url)` | Replaces only the `root_url` line with a loopback URL for staging installs; any other change raises `ValueError`. |
-| `select_bottles(registration, snapshot, github)` | Unprivileged read of tap release `<app>-<version>`: `None` when unpublished; a complete release whose four assets verify is selected as is; anything else published is `BottleConflict`. |
+| `select_bottles(registration, snapshot, github)` | Unprivileged read of tap release `<app>-<version>`: `None` when unpublished; a complete release whose three assets verify is selected as is; anything else published is `BottleConflict`. |
 | `validate_native_checks(document)` | Strict schema v1 check (below); returns a copy. |
 | `native_failures(channel, registration, snapshot, evidence, binding, context, bottles)` | The failing platforms or evidence problems that stop one channel; an empty list passes the gate. |
 
@@ -253,7 +253,7 @@ fields are rejected at every level:
   cannot be replayed.
 - **Brew:** `brew` is not `null`, its `bottle_set` equals the set being
   published, its `identity` equals the recomputed `bottled_formula_identity`,
-  and all four Brew platforms passed with `binding` equal to that
+  and all three Brew platforms passed with `binding` equal to that
   `formula_sha256`.
 - **Scoop and WinGet:** `candidates[channel]` equals the re-rendered digest,
   `windows-amd64` passed, and `windows-arm64` passed or is `statically-mapped`

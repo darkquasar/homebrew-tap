@@ -56,7 +56,7 @@ def bottle(app='patronus', platform='darwin-arm64', salt='', version='2.7.1'):
     return archive(members(app, version, executable(app, platform), salt))
 
 
-TAGS = {'darwin-arm64': 'arm64_sequoia', 'darwin-amd64': 'sequoia',
+TAGS = {'darwin-arm64': 'arm64_sequoia',
         'linux-amd64': 'x86_64_linux', 'linux-arm64': 'arm64_linux'}
 
 
@@ -65,7 +65,7 @@ def root_url(app, version):
 
 
 def bottle_kit(reg, snap, salt=''):
-    """Four verified archives keyed by remote filename plus their bottle_set."""
+    """Three verified archives keyed by remote filename plus their bottle_set."""
     from distribution.bottles import bottle_set, verify_bottle
     app = reg['configuration']['app']
     identity = snap['payload']['identity']
@@ -250,7 +250,7 @@ class VerifyBottle(unittest.TestCase):
     def test_valid_bottle_binds_archive_executable_and_remote_filename(self):
         from distribution.bottles import verify_bottle
         reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
-        for tag, platform in [('arm64_sequoia', 'darwin-arm64'), ('sequoia', 'darwin-amd64'),
+        for tag, platform in [('arm64_sequoia', 'darwin-arm64'),
                               ('x86_64_linux', 'linux-amd64'), ('arm64_linux', 'linux-arm64')]:
             with self.subTest(tag=tag):
                 data = bottle(platform=platform)
@@ -265,15 +265,15 @@ class VerifyBottle(unittest.TestCase):
                         'patronus/2.7.1/.brew', 'patronus/2.7.1/.brew/patronus.rb',
                         'patronus/2.7.1/sbom.spdx.json'])})
 
-    def test_tag_forms_map_to_brew_platforms_from_the_pinned_macos_list(self):
+    def test_tag_forms_map_to_brew_platforms_and_intel_macos_is_not_bottled(self):
         from distribution.bottles import BottleInvalid, bottle_tag_platform
-        expected = {'arm64_sequoia': ('darwin', 'arm64'), 'sequoia': ('darwin', 'amd64'),
-                    'arm64_tahoe': ('darwin', 'arm64'), 'tahoe': ('darwin', 'amd64'),
+        expected = {'arm64_sequoia': ('darwin', 'arm64'), 'arm64_tahoe': ('darwin', 'arm64'),
                     'arm64_sonoma': ('darwin', 'arm64'), 'x86_64_linux': ('linux', 'amd64'),
                     'arm64_linux': ('linux', 'arm64')}
         for tag, platform in expected.items():
             self.assertEqual(bottle_tag_platform(tag), platform)
-        for tag in ['x86_64_sequoia', 'arm64_catalina', 'catalina', 'arm64_freebsd', 'linux',
+        for tag in ['sequoia', 'tahoe', 'sonoma', 'x86_64_sequoia', 'arm64_catalina', 'catalina',
+                    'arm64_freebsd', 'linux',
                     'ARM64_SEQUOIA', 'arm64_sequoia.1', '', 'arm64_sequoia ', 'x86_64_linux_musl',
                     'all', None, 7]:
             with self.subTest(tag=tag), self.assertRaises(BottleInvalid):
@@ -347,7 +347,7 @@ class BottleSets(unittest.TestCase):
         _archives, verified, _ = bottle_kit(reg, snap)
         url = root_url('patronus', '2.7.1')
         with self.assertRaises(BottleInvalid):
-            bottle_set(reg, snap, verified[:3], url)
+            bottle_set(reg, snap, verified[:2], url)
         tahoe = verify_bottle(bottle(platform='darwin-arm64'), reg, snap, 'arm64_tahoe')
         with self.assertRaises(BottleInvalid):
             bottle_set(reg, snap, verified + [tahoe], url)
@@ -482,6 +482,19 @@ class NativeChecksSchema(unittest.TestCase):
             self.assertEqual(native_failures(channel, reg, snap, document, file_digest(render(channel, reg, snap)),
                                              context), [])
         self.assertIn('statically-mapped', [r['outcome'] for r in document['results']])
+
+    def test_intel_macos_is_not_a_brew_platform_in_native_evidence(self):
+        import copy
+        from pathlib import Path
+        from distribution.bottles import NativeEvidenceInvalid, validate_native_checks
+        path = Path(__file__).parent / 'fixtures' / 'bottles' / 'native-checks.example.json'
+        document = json.loads(path.read_text())
+        self.assertEqual(sorted(r['platform'] for r in document['results'] if r['manager'] == 'brew'),
+                         ['darwin-arm64', 'linux-amd64', 'linux-arm64'])
+        intel = copy.deepcopy(next(r for r in document['results'] if r['platform'] == 'darwin-arm64'))
+        intel.update(platform='darwin-amd64', runner='fixture-darwin-amd64')
+        with self.assertRaises(NativeEvidenceInvalid):
+            validate_native_checks(dict(document, results=document['results'] + [intel]))
 
 
 class ReleaseAdapter(unittest.TestCase):

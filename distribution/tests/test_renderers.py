@@ -184,7 +184,6 @@ class Renderers(unittest.TestCase):
         block = ('  license "GPL-3.0-only"\n\n  bottle do\n'
                  f'    root_url "{bottles["root_url"]}"\n'
                  f'    sha256 cellar: :any_skip_relocation, arm64_sequoia: "{tags["arm64_sequoia"]}"\n'
-                 f'    sha256 cellar: :any_skip_relocation, sequoia:       "{tags["sequoia"]}"\n'
                  f'    sha256 cellar: :any_skip_relocation, arm64_linux:   "{tags["arm64_linux"]}"\n'
                  f'    sha256 cellar: :any_skip_relocation, x86_64_linux:  "{tags["x86_64_linux"]}"\n'
                  '  end\n\n  on_macos do\n')
@@ -211,7 +210,7 @@ class Renderers(unittest.TestCase):
             self.assertFalse(validate_candidate('brew', reg, snap, candidate)['passed'])
             self.assertFalse(validate_candidate('brew', reg, snap, render('brew', reg, snap), bottles)['passed'])
             other = copy.deepcopy(bottles)
-            other['tags']['sequoia'] = 'f' * 64
+            other['tags']['arm64_linux'] = 'f' * 64
             self.assertFalse(validate_candidate('brew', reg, snap, candidate, other)['passed'])
             for change in [dict(cellar='any'), dict(release_tag='lumen-2.7.1'), dict(extra=True)]:
                 with self.subTest(change=change):

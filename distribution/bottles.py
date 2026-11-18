@@ -17,7 +17,8 @@ MACOS_RELEASES = {'golden_gate': '27', 'tahoe': '26', 'sequoia': '15', 'sonoma':
                   'ventura': '13', 'monterey': '12', 'big_sur': '11'}
 MACOS_TAGS = tuple(MACOS_RELEASES)
 CELLAR = 'any_skip_relocation'
-BREW_PLATFORMS = ('darwin-arm64', 'darwin-amd64', 'linux-amd64', 'linux-arm64')
+# Intel macOS is not bottled (owner decision 2026-11-18); it installs through the formula's source path.
+BREW_PLATFORMS = ('darwin-arm64', 'linux-amd64', 'linux-arm64')
 
 
 class BottleInvalid(ValueError):
@@ -35,8 +36,6 @@ def bottle_tag_platform(tag):
             return ('linux', 'amd64')
         if tag == 'arm64_linux':
             return ('linux', 'arm64')
-        if tag in MACOS_TAGS:
-            return ('darwin', 'amd64')
         if tag.startswith('arm64_') and tag[6:] in MACOS_TAGS:
             return ('darwin', 'arm64')
     raise BottleInvalid('unsupported bottle tag: ' + repr(tag))
@@ -136,8 +135,8 @@ def verify_bottle(archive, registration, snapshot, tag):
     platform = system + '-' + cpu
     expected = identity['assets'][c['assets'][platform]]['sha256']
     if digest != expected:
-        for other in BREW_PLATFORMS:
-            if identity['assets'][c['assets'][other]]['sha256'] == digest:
+        for other, name in c['assets'].items():
+            if identity['assets'][name]['sha256'] == digest:
                 raise BottleConflict(f'bottled executable {executable} is the {other} asset, not {platform} '
                                      f'for tag {tag}')
         raise BottleConflict(f'bottled executable {executable} sha256 {digest} differs from '
@@ -208,8 +207,7 @@ def ordered_tags(tags):
     def key(tag):
         system, cpu = bottle_tag_platform(tag)
         if system == 'darwin':
-            name = tag[6:] if cpu == 'arm64' else tag
-            return f"{3 if cpu == 'arm64' else 2}.{MACOS_RELEASES[name]}_{tag}"
+            return f"3.{MACOS_RELEASES[tag[6:]]}_{tag}"
         return f"{1 if cpu == 'arm64' else 0}.{tag}"
     return sorted(tags, key=key, reverse=True)
 
@@ -418,7 +416,7 @@ def _validate_native_checks(document):
 def native_failures(channel, registration, snapshot, evidence, binding, context=None, bottles=None):
     """Failing platforms (or evidence problems) that stop one channel; [] means the gate passes.
 
-    Brew: all four Brew platforms passed, bound to one bottled_formula_identity that
+    Brew: all three Brew platforms passed, bound to one bottled_formula_identity that
     the caller reproduced (binding = formula sha256, bottles = its bottle_set).
     Scoop/WinGet: windows-amd64 passed and windows-arm64 passed or statically
     mapped for no-hosted-runner, each bound to the re-rendered candidate digest.

@@ -267,7 +267,7 @@ class StageBottles(Workspace):
             stage_bottles(self.out, reg, snap, archives, source='fresh', loopback='https://example.com')
 
 
-BREW_PLATFORMS = ('darwin-arm64', 'darwin-amd64', 'linux-amd64', 'linux-arm64')
+BREW_PLATFORMS = ('darwin-arm64', 'linux-amd64', 'linux-arm64')
 WINDOWS_PLATFORMS = ('windows-amd64', 'windows-arm64')
 PASSED = dict(validate='passed', install='passed', version='passed', uninstall='passed')
 
@@ -321,7 +321,7 @@ class Summarize(SummaryInputs):
                          url='https://github.com/darkquasar/homebrew-tap/actions/runs/4242/attempts/2'))
         self.assertEqual(document['brew']['bottle_set'], self.bottles)
         self.assertEqual(document['brew']['source'], 'fresh')
-        self.assertEqual(len(document['results']), 8)
+        self.assertEqual(len(document['results']), 7)
         brew = self.entry(document, 'brew', 'darwin-arm64')
         self.assertEqual((brew['runner'], brew['image'], brew['image_version'], brew['manager_version']),
                          ('hosted-darwin-arm64', 'image-darwin-arm64', '20261117.1', 'brew 1.0'))
@@ -372,12 +372,12 @@ class Summarize(SummaryInputs):
 
     def test_build_failure_is_the_result_when_no_check_ran(self):
         failed = dict(PASSED, validate='failed', install='not-run', version='not-run', uninstall='not-run')
-        build = report('brew', 'darwin-amd64', self.prepared, stage='build', outcome='failed',
-                       reason='architecture-mismatch: executable is the darwin-arm64 asset', steps=failed)
+        build = report('brew', 'linux-amd64', self.prepared, stage='build', outcome='failed',
+                       reason='architecture-mismatch: executable is the linux-arm64 asset', steps=failed)
         # Without brew.json (assemble could not run) no brew-check runs either.
         reports = [r for r in self.reports if r['manager'] != 'brew'] + [build]
         document = self.summarize(reports, brew=None)
-        entry = self.entry(document, 'brew', 'darwin-amd64')
+        entry = self.entry(document, 'brew', 'linux-amd64')
         self.assertEqual((entry['outcome'], entry['reason'], entry['steps']), ('failed', build['reason'], failed))
         other = self.entry(document, 'brew', 'darwin-arm64')
         self.assertEqual((other['outcome'], other['reason']), ('failed', 'no result'))

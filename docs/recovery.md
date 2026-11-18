@@ -134,7 +134,7 @@ files as an unrecorded bypass.
 
 **PENDING the first bottled release.** Every release run checks each channel on
 hosted runners before it publishes (PD-17), and Brew publishes only a bottled
-formula whose four bottles are durable on tap release `<app>-<version>`
+formula whose three bottles are durable on tap release `<app>-<version>`
 (PD-16). Each channel result carries `native_checks` (`run` and `digest` of the
 run's `native-checks.json`). A failure stops only its channel: the previous
 formula, bottles or manifest stay in place, and the other channels proceed.
@@ -172,7 +172,7 @@ python3 -B -m distribution.cli verify-bottle \
   --snapshot "$recovery_dir/protected-snapshot.json" --out "$recovery_dir/verify-arm64_sequoia.json"
 ```
 
-Repeat for tags `sequoia`, `x86_64_linux` and `arm64_linux`. The exit status
+Repeat for tags `x86_64_linux` and `arm64_linux`. The exit status
 is 0 when the bottle verifies, 1 when the registration or snapshot cannot be
 read or is invalid (`InputInvalid`), 2 for `BottleInvalid` (unreadable archive,
 unsafe or unexpected member, unsupported tag) and 3 for `BottleConflict` (the

@@ -47,7 +47,6 @@ their own artifacts.
 | Manager | Platform | Runner label | Steps |
 |---|---|---|---|
 | Homebrew | macOS arm64 | `macos-15` | `ruby -c` and `brew style`, pour the bottle, `--version`, `brew test`, uninstall |
-| Homebrew | macOS Intel | `macos-15-intel` | Same |
 | Homebrew | Linux x86_64 | `ubuntu-24.04` | Same |
 | Homebrew | Linux arm64 | `ubuntu-24.04-arm` | Same |
 | Scoop, WinGet | Windows x64 | `windows-2025` | Schema validation (`winget validate` too), install as an ordinary user, `--version`, uninstall |
@@ -64,8 +63,8 @@ listed there as statically mapped is recorded `statically-mapped`
 the publisher's gate (`bottles.native_failures`): it is accepted only for
 `windows-arm64` with reason `no-hosted-runner`. Every Brew platform and
 `windows-amd64` must pass, so retiring one of their runner labels blocks the
-affected channel until `pins.json` names a replacement. Currently all six labels
-run.
+affected channel until `pins.json` names a replacement. Currently all five labels
+run. Intel macOS is not bottled, so it has no Homebrew row.
 
 In fixture mode, `render` builds a synthetic program for all six platforms at
 versions 2.7.0 and 2.7.1, freezes a fixture snapshot and serves the assets on

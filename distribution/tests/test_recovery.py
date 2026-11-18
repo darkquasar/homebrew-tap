@@ -358,20 +358,20 @@ class BottleEvidenceBindingTests(unittest.TestCase):
                 gh, ref = publisher(directory)
                 inputs = checked(gh,ref)
                 rebuilt = checked(gh,ref,salt='substitute')['archives']
-                name = 'patronus-2.7.1.sequoia.bottle.tar.gz'
+                name = 'patronus-2.7.1.x86_64_linux.bottle.tar.gz'
                 brew = inputs['evidence']['brew']
                 if change == 'archive':
                     inputs['archives'][name] = rebuilt[name]
                 elif change == 'tag-hash':
                     inputs['archives'][name] = rebuilt[name]
-                    brew['bottle_set']['tags']['sequoia'] = hashlib.sha256(rebuilt[name]).hexdigest()
+                    brew['bottle_set']['tags']['x86_64_linux'] = hashlib.sha256(rebuilt[name]).hexdigest()
                 elif change == 'formula-identity':
                     brew['identity']['formula_sha256'] = 'f'*64
                     for entry in inputs['evidence']['results']:
                         if entry['manager'] == 'brew':
                             entry['binding'] = 'f'*64
                 else:
-                    entry = next(e for e in inputs['evidence']['results'] if e['platform'] == 'darwin-amd64')
+                    entry = next(e for e in inputs['evidence']['results'] if e['platform'] == 'linux-amd64')
                     entry['binding'] = 'e'*64
                 output = run_publish(gh,ref,inputs,channels=('brew','scoop'))
                 self.assert_blocked(gh,output)

@@ -212,7 +212,7 @@ commissioning, not a reason to add Workflows write.
 
 **PENDING commissioning.** Homebrew bottles are assets of one tap GitHub Release
 per app and version, tagged `<app>-<version>` (for example `patronus-2.7.1`).
-The publisher creates a draft owned by its run, uploads the four bottles, reads
+The publisher creates a draft owned by its run, uploads the three bottles, reads
 them back, publishes the draft (which creates the tag) and commits the bottled
 formula only after a public read-back. Once a formula references a bottle, its
 bytes are never replaced. Protect that with these settings, in this order:
@@ -298,10 +298,10 @@ The `native-checks` job calls `.github/workflows/native-checks.yml` in release
 mode after authority and before publish (PD-16, PD-17). Every job in it has
 `contents: read`, no environment and no secrets. It renders the candidates from
 the frozen record, selects a complete published `<app>-<version>` bottle set or
-builds four fresh bottles when none is published (any other release state fails
+builds three fresh bottles when none is published (any other release state fails
 Brew), then installs, version-checks and uninstalls each channel on its hosted
-runners: Homebrew on `macos-15`, `macos-15-intel`, `ubuntu-24.04` and
-`ubuntu-24.04-arm`; Scoop and WinGet as an ordinary user on `windows-2025` and
+runners: Homebrew on `macos-15`, `ubuntu-24.04` and `ubuntu-24.04-arm` (Intel
+Macs are not bottled or checked); Scoop and WinGet as an ordinary user on `windows-2025` and
 `windows-11-arm`. Its `native-checks` artifact holds
 `native-checks.json`; `native-brew-candidate` holds the checked archives. The
 publisher downloads both from its own run, re-verifies every archive and fails
@@ -329,7 +329,7 @@ Before declaring setup accepted, retain exact policy/role/ref denial evidence,
 the tag ruleset and immutable release observations, producer merge/workflow SHAs,
 approved registration and snapshot digests, per-channel commits/results, the
 first real release's `native-checks.json` and tap release `<app>-<version>`
-with its four bottle digests, the native lifecycle observations and the owner's
+with its three bottle digests, the native lifecycle observations and the owner's
 real WinGet browser PR URL. Brew/Scoop must be usable and other setup checks passed;
 WinGet may be `submitted` pending Microsoft, not merely `prepared`. Keep public
 WinGet install guidance pending until default-source visibility and native

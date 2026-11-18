@@ -474,7 +474,7 @@ class BottlePublication(unittest.TestCase):
             publish_at = ops.index('publish')
             formula_at = next(i for i, e in enumerate(log) if e[1] == 'cas' and 'Formula/patronus.rb' in e[3])
             downloads = [i for i, e in enumerate(log) if e[1] == 'download']
-            self.assertEqual(len([i for i in downloads if publish_at < i < formula_at]), 4)
+            self.assertEqual(len([i for i in downloads if publish_at < i < formula_at]), 3)
             self.assertLess(ops.index('create'), ops.index('upload'))
             self.assertLess(max(i for i, o in enumerate(ops) if o == 'upload'), ops.index('draft-read'))
             self.assertLess(ops.index('draft-read'), publish_at)
