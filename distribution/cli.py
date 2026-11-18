@@ -70,6 +70,62 @@ def workflow_arguments(argv):
     return command
 
 
+def verify_bottle_command(argv):
+    """Offline bottle check for unprivileged build jobs: no credentials, no network."""
+    from . import bottles
+    parser = argparse.ArgumentParser(prog='distribution.cli verify-bottle')
+    for name in ['archive','tag','registration','snapshot','out']:
+        parser.add_argument('--'+name,required=True)
+    args = parser.parse_args(argv)
+    try:
+        try:
+            archive = read_regular(Path(args.archive),limit=bottles.MAX_ARCHIVE)
+        except (OSError,ValueError) as error:
+            raise bottles.BottleInvalid('archive input rejected: '+str(error)) from None
+        registration = strict_json(read_regular(Path(args.registration)))
+        snapshot = strict_json(read_regular(Path(args.snapshot)))
+        document,code = bottles.verify_bottle(archive,registration,snapshot,args.tag),0
+    except bottles.BottleConflict as error:
+        document,code = dict(error='BottleConflict',message=str(error)),3
+    except bottles.BottleInvalid as error:
+        document,code = dict(error='BottleInvalid',message=str(error)),2
+    except Exception as error:
+        document,code = dict(error='InputInvalid',message=str(error)),1
+    target = Path(args.out)
+    require(not target.is_symlink(), 'output symlink denied')
+    target.write_bytes(encode(document))
+    print(encode(document).decode())
+    return code
+
+
+def native_evidence(path):
+    """The run's native-checks.json; absence or damage means missing evidence, never a crash."""
+    if not path:
+        return None,'DISTRIBUTION_NATIVE_CHECKS not set'
+    try:
+        return strict_json(read_regular(Path(path))),None
+    except Exception as error:
+        return None,'native-checks.json unreadable: '+str(error)
+
+
+def bottle_archives(path, app, version):
+    """Regular files named <app>-<version>.<tag>.bottle.tar.gz; others are ignored, links rejected."""
+    import re
+    from .bottles import MAX_ARCHIVE
+    if not path:
+        return {},'DISTRIBUTION_BOTTLES_DIR not set'
+    try:
+        require(matches(VERSION,version), 'record version unavailable')
+        root = Path(path)
+        require(not root.is_symlink() and root.is_dir(), 'bottle directory must be a regular directory')
+        pattern = re.escape(app+'-'+version+'.')+r'[a-z0-9_]+\.bottle\.tar\.gz'
+        names = sorted(entry.name for entry in root.iterdir() if re.fullmatch(pattern,entry.name))
+        require(len(names) <= 8, 'too many bottle archives')
+        return {name: read_regular(root/name,limit=MAX_ARCHIVE) for name in names},None
+    except Exception as error:
+        return {},'bottle archives unreadable: '+str(error)
+
+
 def observe_source(argv, *, github=None, command=None, runner=None):
     """Secret-free workflow entry: protected registration supplies the query identity."""
     from .github import collect_windows_source
@@ -114,6 +170,8 @@ def main(argv=None, *, github=None, credentials=None, source_command=None, sourc
     if argv and argv[0] == 'validate':
         from .validation import main as validate
         return validate(argv[1:])
+    if argv and argv[0] == 'verify-bottle':
+        return verify_bottle_command(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='mode',required=True)
     command = sub.add_parser('register')
@@ -163,7 +221,14 @@ def main(argv=None, *, github=None, credentials=None, source_command=None, sourc
                     require(args.mode in {'prepare','approve-baseline','retry'}, 'unsupported publisher operation')
                     ref = strict_json(os.environ.get('DISTRIBUTION_RECORD_REF',''))
                     channels = [args.channel] if args.mode == 'retry' else None
-                    document = controller.publish(registration,ref,github,credential_owner,channels=channels)
+                    evidence, evidence_error = native_evidence(os.environ.get('DISTRIBUTION_NATIVE_CHECKS'))
+                    archives, archive_error = bottle_archives(os.environ.get('DISTRIBUTION_BOTTLES_DIR'),
+                                                              app,ref.get('version') if type(ref) is dict else None)
+                    document = controller.publish(registration,ref,github,credential_owner,channels=channels,
+                                                  evidence=evidence,archives=archives)
+                    errors = [e for e in [evidence_error,archive_error] if e]
+                    if errors:
+                        document['native_input_errors'] = errors
             else:
                 request = {}
                 if args.mode == 'prepare':

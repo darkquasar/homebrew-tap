@@ -1,0 +1,125 @@
+{
+  "state": "pending",
+  "fixture_only": true,
+  "source_revisions": null,
+  "candidate_digests": null,
+  "snapshot_digests": null,
+  "host": {
+    "os": null,
+    "cpu": null,
+    "process_arch": null,
+    "manager_version": null,
+    "runner_image": null,
+    "privileges": null
+  },
+  "cases": {
+    "brew": {
+      "install": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "upgrade": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "remove": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      }
+    },
+    "scoop": {
+      "install": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "upgrade": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "remove": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      }
+    },
+    "winget": {
+      "install": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "upgrade": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      },
+      "remove": {
+        "state": "pending",
+        "command": null,
+        "exit": null,
+        "log": null,
+        "resolved_path": null,
+        "binary_sha256": null,
+        "reported_version": null,
+        "preservation_before_manifest": null,
+        "preservation_after_manifest": null
+      }
+    }
+  },
+  "default_source_observation": null,
+  "browser_pr": null,
+  "unverified": []
+}

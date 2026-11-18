@@ -12,6 +12,7 @@ from test_renderers import fixture
 from test_controller import LocalGit
 from test_contracts import approve
 from test_controller import Credentials, EvidenceGitHub
+from test_bottles import checked
 from test_recovery import versioned
 from distribution.state import encode
 from distribution.contracts import CONTROL_REPOSITORY
@@ -225,7 +226,7 @@ class WingetTests(unittest.TestCase):
             gh.context['role']='publish'
             gh.env='package-publisher'
             gh.init('darkquasar/scoop-bucket')
-            controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'])
+            controller.publish(gh.registration,ref,gh,Credentials(),channels=['scoop'],**checked(gh,ref))
             tip = gh.branch_tip('darkquasar/scoop-bucket','main')
             gh.context['mode']='status'
             gh.controller_run.update(actor_id=OWNER_ID,triggering_actor_id=OWNER_ID)

@@ -16,6 +16,7 @@ from test_renderers import fixture
 import test_validation
 import test_trust
 from distribution.contracts import CONTROL_REPOSITORY, OWNER_ID
+from test_bottles import FakeReleases, bottle_kit, checked, recorded_snapshot
 
 REAL_RUN = subprocess.run
 
@@ -124,13 +125,14 @@ class LocalGit:
 class ChannelTests(unittest.TestCase):
     def test_valid_formula_is_discoverable_and_preserves_other_app(self):
         reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
-        candidate = render('brew', reg, snap)
+        bottles = bottle_kit(reg, snap)[2]
+        candidate = render('brew', reg, snap, bottles)
         with tempfile.TemporaryDirectory() as directory:
             gh = LocalGit(directory)
             repo = reg['configuration']['destinations']['brew']['repository']
             gh.init(repo, files={'Formula/lumen.rb': b'other app sentinel\n'})
             with patch('distribution.validation.subprocess.run', side_effect=native_success):
-                result = controller.apply_channel('brew', reg, snap, candidate, gh)
+                result = controller.apply_channel('brew', reg, snap, candidate, gh, bottles=bottles)
             self.assertEqual(result['state'], 'published')
             tree = gh.tree(repo, gh.branch_tip(repo, 'main'))
             self.assertEqual(tree['Formula/patronus.rb']['content'], candidate['Formula/patronus.rb'])
@@ -150,8 +152,8 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(gh.branch_tip(repo, 'main'), tip)
 
 
-class EvidenceGitHub(LocalGit, test_trust.GitHub):
-    """GitHub API evidence and bare Git writes are external boundaries."""
+class EvidenceGitHub(LocalGit, test_trust.GitHub, FakeReleases):
+    """GitHub API evidence, releases and bare Git writes are external boundaries."""
     def __init__(self, root, app='patronus', version='2.7.1'):
         LocalGit.__init__(self, root)
         test_trust.GitHub.__init__(self, app, version)
@@ -165,6 +167,12 @@ class EvidenceGitHub(LocalGit, test_trust.GitHub):
 
     def controller_context(self):
         return copy.deepcopy(self.context)
+
+    def cas(self, repo, branch, expected, changes, *, base=None):
+        commit = LocalGit.cas(self, repo, branch, expected, changes, base=base)
+        if commit:
+            self._service().log.append((self.context['run_id'], 'cas', repo, tuple(sorted(changes))))
+        return commit
 
     def ref(self, repo, ref):
         if repo == CONTROL_REPOSITORY and ref == 'heads/distribution-records':
@@ -330,7 +338,15 @@ class PublisherTests(unittest.TestCase):
             gh.context['role']='publish'
             gh.env='package-publisher'
             gh.init('darkquasar/scoop-bucket')
-            with patch.dict('os.environ',{'DISTRIBUTION_RECORD_REF':json.dumps(ref)}), patch(
+            inputs = checked(gh, ref)
+            native = Path(directory)/'native-checks.json'
+            native.write_bytes(encode(inputs['evidence']))
+            bottles = Path(directory)/'bottles'
+            bottles.mkdir()
+            for name, data in inputs['archives'].items():
+                (bottles/name).write_bytes(data)
+            with patch.dict('os.environ',{'DISTRIBUTION_RECORD_REF':json.dumps(ref),
+                    'DISTRIBUTION_NATIVE_CHECKS':str(native),'DISTRIBUTION_BOTTLES_DIR':str(bottles)}), patch(
                     'distribution.validation.subprocess.run',side_effect=native_success):
                 # Winget is deliberately unavailable; Brew and Scoop must still complete.
                 code = main(args,github=gh,credentials=Credentials())
@@ -338,6 +354,34 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(code,1)
             self.assertEqual(result['channels']['brew']['state'],'published')
             self.assertEqual(result['channels']['scoop']['state'],'published')
+
+    @patch('sys.stdout',new_callable=io.StringIO)
+    def test_publisher_cli_without_native_evidence_fails_each_channel_closed(self,_stdout):
+        from distribution.cli import main
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            original_file = gh.file
+            def file(repo,commit,path):
+                if path == '.distribution/registrations/patronus.json':
+                    return {'type':'file','content':encode(gh.registration)}
+                return original_file(repo,commit,path)
+            gh.file = file
+            out = Path(directory)/'publish.json'
+            tips = {r: gh.branch_tip(r,'main') for r in [CONTROL_REPOSITORY,'darkquasar/scoop-bucket']}
+            with patch.dict('os.environ',{'DISTRIBUTION_RECORD_REF':json.dumps(ref)}), patch(
+                    'distribution.validation.subprocess.run',side_effect=native_success):
+                os_env = __import__('os').environ
+                os_env.pop('DISTRIBUTION_NATIVE_CHECKS',None)
+                os_env.pop('DISTRIBUTION_BOTTLES_DIR',None)
+                code = main(['prepare','--app','patronus','--run-id','50','--attempt','1','--out',str(out)],
+                            github=gh,credentials=Credentials())
+            result = json.loads(out.read_bytes())
+            self.assertEqual(code,1)
+            for channel in ['brew','scoop','winget']:
+                self.assertEqual(result['channels'][channel]['failure_code'],'native-check-failed')
+            self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'),tips['darkquasar/scoop-bucket'])
+            self.assertNotIn('Formula/patronus.rb',gh.tree(CONTROL_REPOSITORY,gh.branch_tip(CONTROL_REPOSITORY,'main')))
+            self.assertFalse(gh._service().ops('create','upload','publish'))
 
     def prepared(self, directory):
         gh = EvidenceGitHub(directory)
@@ -351,11 +395,11 @@ class PublisherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             gh, ref = self.prepared(directory)
             credentials = Credentials()
-            output = controller.publish(gh.registration, ref, gh, credentials, channels=['scoop'])
+            output = controller.publish(gh.registration, ref, gh, credentials, channels=['scoop'], **checked(gh, ref))
             self.assertEqual(output['channels']['scoop']['state'], 'published')
             self.assertEqual(set(credentials.minted), {'publish'})
             tip = gh.branch_tip('darkquasar/scoop-bucket','main')
-            second = controller.publish(gh.registration, ref, gh, Credentials(), channels=['scoop'])
+            second = controller.publish(gh.registration, ref, gh, Credentials(), channels=['scoop'], **checked(gh, ref))
             self.assertEqual(second['channels']['scoop']['destination_commit'], tip)
             self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'), tip)
             status = json.loads(gh.tree(CONTROL_REPOSITORY, gh.branch_tip(CONTROL_REPOSITORY,'main'))[
@@ -390,6 +434,214 @@ class PublisherTests(unittest.TestCase):
                     controller.publish(gh.registration, ref, gh, credentials, channels=['scoop'])
                 self.assertEqual(credentials.minted, [])
                 self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket','main'), tip)
+
+
+class BottlePublication(unittest.TestCase):
+    """Formula publication follows durable, verified tap bottle releases (PD-16)."""
+    def prepared(self, directory):
+        return PublisherTests.prepared(self, directory)
+
+    def publish(self, gh, ref, inputs, channels=('brew', 'scoop')):
+        with patch('distribution.validation.subprocess.run', side_effect=native_success):
+            return controller.publish(gh.registration, ref, gh, Credentials(), channels=list(channels), **inputs)
+
+    def formula(self, gh):
+        return gh.tree(CONTROL_REPOSITORY, gh.branch_tip(CONTROL_REPOSITORY, 'main')).get('Formula/patronus.rb')
+
+    def test_fresh_set_is_published_and_read_back_before_the_formula_commit(self):
+        from distribution.bottles import bottled_formula_identity
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            inputs = checked(gh, ref)
+            bottles = inputs['evidence']['brew']['bottle_set']
+            target = gh.branch_tip(CONTROL_REPOSITORY, 'main')
+            output = self.publish(gh, ref, inputs)
+            brew = output['channels']['brew']
+            self.assertEqual(brew['state'], 'published', brew)
+            self.assertEqual(output['channels']['scoop']['state'], 'published')
+            snap = recorded_snapshot(gh, ref)
+            formula = render('brew', gh.registration, snap, bottles)['Formula/patronus.rb']
+            self.assertEqual(self.formula(gh)['content'], formula)
+            identity = bottled_formula_identity(gh.registration, snap, bottles)
+            self.assertEqual((brew['release_tag'], brew['bottle_set_sha256'], brew['bottles']),
+                             ('patronus-2.7.1', identity['bottle_set_sha256'], bottles['tags']))
+            marker = json.loads(gh.tree(CONTROL_REPOSITORY, gh.branch_tip(CONTROL_REPOSITORY, 'main'))[
+                '.distribution/channels/patronus.json']['content'])
+            self.assertEqual((marker['release_tag'], marker['bottle_set_sha256'], marker['bottles']),
+                             ('patronus-2.7.1', identity['bottle_set_sha256'], bottles['tags']))
+            log = gh.releases_service.log
+            ops = [entry[1] for entry in log]
+            publish_at = ops.index('publish')
+            formula_at = next(i for i, e in enumerate(log) if e[1] == 'cas' and 'Formula/patronus.rb' in e[3])
+            downloads = [i for i, e in enumerate(log) if e[1] == 'download']
+            self.assertEqual(len([i for i in downloads if publish_at < i < formula_at]), 3)
+            self.assertLess(ops.index('create'), ops.index('upload'))
+            self.assertLess(max(i for i, o in enumerate(ops) if o == 'upload'), ops.index('draft-read'))
+            self.assertLess(ops.index('draft-read'), publish_at)
+            release = next(iter(gh.releases_service.releases.values()))
+            self.assertEqual(sorted(release['assets']), sorted(inputs['archives']))
+            self.assertEqual((release['draft'], release['make_latest'], release['target']), (False, False, target))
+            for text in ['40', 'attempt: 1', identity['bottle_set_sha256']]:
+                self.assertIn(text, release['body'])
+
+    def test_published_set_is_reused_and_fresh_archives_cannot_replace_it(self):
+        from distribution.bottles import select_bottles
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            first = self.publish(gh, ref, checked(gh, ref))
+            self.assertEqual(first['channels']['brew']['state'], 'published')
+            tip = gh.branch_tip(CONTROL_REPOSITORY, 'main')
+            formula = self.formula(gh)
+            snap = recorded_snapshot(gh, ref)
+            rebuilt = checked(gh, ref, salt='rebuilt')
+            self.assertNotEqual(rebuilt['archives'], checked(gh, ref)['archives'])
+            raced = self.publish(gh, ref, rebuilt, channels=['brew'])
+            self.assertEqual(raced['channels']['brew']['failure_code'], 'bottle-race')
+            selected = select_bottles(gh.registration, snap, gh)
+            self.assertEqual(selected['source'], 'published')
+            self.assertEqual(selected['bottle_set'], checked(gh, ref)['evidence']['brew']['bottle_set'])
+            before = len(gh.releases_service.log)
+            second = self.publish(gh, ref, checked(gh, ref, selected=selected), channels=['brew'])
+            self.assertEqual(second['channels']['brew']['state'], 'published')
+            self.assertEqual(self.formula(gh), formula)
+            writes = {'create', 'upload', 'publish', 'delete'}
+            self.assertFalse([e for e in gh.releases_service.log[before:] if e[1] in writes])
+            self.assertEqual(len(gh.releases_service.releases), 1)
+            self.assertEqual(gh.tree(CONTROL_REPOSITORY, gh.branch_tip(CONTROL_REPOSITORY, 'main'))['Formula/patronus.rb'],
+                             gh.tree(CONTROL_REPOSITORY, tip)['Formula/patronus.rb'])
+
+    def test_incomplete_or_mismatched_published_release_is_a_conflict_without_rebuild(self):
+        from distribution.bottles import BottleConflict, select_bottles
+        from test_bottles import archive, members
+        for change in ['missing', 'substituted', 'extra']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                gh, ref = self.prepared(directory)
+                inputs = checked(gh, ref)
+                assets = dict(inputs['archives'])
+                name = sorted(assets)[0]
+                if change == 'missing':
+                    del assets[name]
+                elif change == 'substituted':
+                    assets[name] = archive(members(binary=b'other executable'))
+                else:
+                    assets['patronus-2.7.1.arm64_tahoe.bottle.tar.gz'] = assets[name]
+                service = gh._service()
+                service.releases[1] = dict(id=1, tag='patronus-2.7.1', draft=False, body='', target='',
+                                           make_latest=False, assets=assets, creator=0)
+                with self.assertRaises(BottleConflict):
+                    select_bottles(gh.registration, recorded_snapshot(gh, ref), gh)
+                before = len(service.log)
+                output = self.publish(gh, ref, inputs)
+                self.assertEqual(output['channels']['brew']['failure_code'], 'bottle-conflict')
+                self.assertEqual(output['channels']['scoop']['state'], 'published')
+                self.assertIsNone(self.formula(gh))
+                self.assertFalse([e for e in service.log[before:] if e[1] in {'create', 'upload', 'publish', 'delete'}])
+                self.assertEqual(service.releases[1]['assets'], assets)
+
+    def test_one_missing_or_failed_platform_publishes_no_release_and_scoop_completes(self):
+        for change in ['missing-result', 'failed-result', 'missing-archive']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                gh, ref = self.prepared(directory)
+                inputs = checked(gh, ref)
+                results = inputs['evidence']['results']
+                arm_linux = next(r for r in results if r['manager'] == 'brew' and r['platform'] == 'linux-arm64')
+                if change == 'missing-result':
+                    results.remove(arm_linux)
+                elif change == 'failed-result':
+                    arm_linux.update(outcome='failed', steps=dict(arm_linux['steps'], install='failed'))
+                else:
+                    del inputs['archives']['patronus-2.7.1.arm64_linux.bottle.tar.gz']
+                output = self.publish(gh, ref, inputs)
+                brew = output['channels']['brew']
+                self.assertEqual(brew['state'], 'failed')
+                self.assertEqual(brew['failure_code'], 'native-check-failed')
+                self.assertIn('linux-arm64', ' '.join(brew['failing_platforms']))
+                self.assertEqual(output['channels']['scoop']['state'], 'published')
+                self.assertIsNone(self.formula(gh))
+                self.assertFalse(gh._service().ops('create', 'upload', 'publish'))
+
+    def test_second_app_registration_cannot_use_the_patronus_release_tag(self):
+        from distribution.bottles import BottleInvalid, check_bottle_set
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            inputs = checked(gh, ref)
+            bottles = inputs['evidence']['brew']['bottle_set']
+            lumen_reg, lumen_snap = fixture('lumen', 'registration'), fixture('lumen', 'snapshot')
+            with self.assertRaises(BottleInvalid):
+                check_bottle_set(lumen_reg, lumen_snap, bottles)
+            lumen_bottles = dict(bottles, root_url=bottles['root_url'].replace('patronus-2.7.1', 'lumen-1.4.2'),
+                                 release_tag='patronus-1.4.2')
+            for forged in [bottles, lumen_bottles]:
+                result = controller.apply_bottles(lumen_reg, lumen_snap, forged, inputs['archives'],
+                                                  inputs['evidence'], gh)
+                self.assertEqual(result['state'], 'failed')
+                self.assertEqual(result['app'], 'lumen')
+            self.assertFalse(gh._service().ops('create', 'upload', 'publish', 'delete'))
+
+    def test_same_version_retry_after_success_changes_nothing(self):
+        from distribution.bottles import select_bottles
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            self.publish(gh, ref, checked(gh, ref))
+            tips = {repo: gh.branch_tip(repo, 'main') for repo in [CONTROL_REPOSITORY, 'darkquasar/scoop-bucket']}
+            releases = copy.deepcopy(gh.releases_service.releases)
+            selected = select_bottles(gh.registration, recorded_snapshot(gh, ref), gh)
+            before = len(gh.releases_service.log)
+            again = self.publish(gh, ref, checked(gh, ref, selected=selected))
+            self.assertEqual(again['channels']['brew']['state'], 'published')
+            self.assertEqual(again['channels']['brew']['message'], 'identical destination reconciled')
+            self.assertEqual(gh.branch_tip('darkquasar/scoop-bucket', 'main'), tips['darkquasar/scoop-bucket'])
+            self.assertEqual(gh.releases_service.releases, releases)
+            self.assertFalse([e for e in gh.releases_service.log[before:]
+                              if e[1] in {'create', 'upload', 'publish', 'delete'}
+                              or (e[1] == 'cas' and 'Formula/patronus.rb' in e[3])])
+
+    def test_crash_after_release_publish_keeps_previous_formula_and_retry_reuses_release(self):
+        from distribution.bottles import select_bottles
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            actual = gh.cas
+            def crash(repo, branch, expected, changes, **kwargs):
+                if 'Formula/patronus.rb' in changes:
+                    raise ConnectionError('runner lost after release publication')
+                return actual(repo, branch, expected, changes, **kwargs)
+            gh.cas = crash
+            first = self.publish(gh, ref, checked(gh, ref), channels=['brew'])
+            self.assertEqual(first['channels']['brew']['state'], 'failed')
+            self.assertIsNone(self.formula(gh))
+            self.assertEqual(len(gh._service().ops('publish')), 1)
+            gh.cas = actual
+            selected = select_bottles(gh.registration, recorded_snapshot(gh, ref), gh)
+            self.assertIsNotNone(selected)
+            second = self.publish(gh, ref, checked(gh, ref, salt='fresh-rebuild-differs', selected=selected),
+                                  channels=['brew'])
+            self.assertEqual(second['channels']['brew']['state'], 'published')
+            self.assertEqual(len(gh._service().ops('create')), 1)
+            self.assertEqual(second['channels']['brew']['bottle_set_sha256'],
+                             canonical_digest(selected['bottle_set']))
+            self.assertIsNotNone(self.formula(gh))
+
+    def test_tag_taken_at_draft_creation_is_a_race_without_writes(self):
+        from distribution.github import ReleaseTagTaken
+        with tempfile.TemporaryDirectory() as directory:
+            gh, ref = self.prepared(directory)
+            def taken(*args):
+                raise ReleaseTagTaken('patronus-2.7.1')
+            gh.create_bottle_draft = taken
+            output = self.publish(gh, ref, checked(gh, ref), channels=['brew'])
+            self.assertEqual(output['channels']['brew']['failure_code'], 'bottle-race')
+            self.assertIsNone(self.formula(gh))
+            self.assertFalse(gh._service().ops('upload', 'publish', 'delete'))
+
+    def test_unbottled_formula_is_never_a_publishable_brew_candidate(self):
+        reg, snap = fixture('patronus', 'registration'), fixture('patronus', 'snapshot')
+        with tempfile.TemporaryDirectory() as directory:
+            gh = LocalGit(directory)
+            tip = gh.init(reg['configuration']['destinations']['brew']['repository'])
+            with patch('distribution.validation.subprocess.run', side_effect=native_success):
+                result = controller.apply_channel('brew', reg, snap, render('brew', reg, snap), gh)
+            self.assertEqual(result['state'], 'failed')
+            self.assertEqual(gh.branch_tip(reg['configuration']['destinations']['brew']['repository'], 'main'), tip)
 
 
 class WindowsQueryTests(unittest.TestCase):

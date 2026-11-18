@@ -9,8 +9,13 @@ def ruby_string(value):
     return re.sub(r'#(?=[{@$])', r'\\#', json.dumps(value, ensure_ascii=False))
 
 
-def render(registration, snapshot):
+def render(registration, snapshot, bottles=None):
     c, identity = inputs(registration, snapshot)
+    block = ''
+    if bottles is not None:
+        from .bottles import bottle_block
+        block = bottle_block(registration, snapshot, bottles) + '\n'
+
     command = c['identifiers']['command']
     stanzas = []
     installs = []
@@ -40,7 +45,7 @@ def render(registration, snapshot):
   version {ruby_string(identity['version'])}
   license {ruby_string(c['license'])}
 
-{chr(10).join(stanzas)}
+{block}{chr(10).join(stanzas)}
 
   def install
     supported = (OS.mac? || OS.linux?) && Hardware::CPU.is_64_bit? &&

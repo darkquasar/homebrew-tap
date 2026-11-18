@@ -1,0 +1,33 @@
+{
+  "kind": "invented-static-preservation-fixture",
+  "authority": "none",
+  "not_a_native_result": true,
+  "placement": {
+    "project/": "contents copied into disposable project root",
+    "home/": "contents copied into disposable home root; actual defaults listed in README"
+  },
+  "files": {
+    "project/.claude/settings.json": "7cca3ebb0ef0ac689c686fa5eb5ee78ee537dcfe10d292c405709056c91e6f39",
+    "project/.claude/skills/invented-preservation/SKILL.md": "c839075c77873a64fce834e77e2dc673d61ec60fb201cda18f9af21c504b7866",
+    "project/.codex/config.toml": "c6c42ec261e9160f597b86249deb56e55716dfe26f6f6d6cfbfeaaf4ddef1569",
+    "project/.patronus/state.json": "cdbb4e3843779268d9123e845f426bd382567eb88b1ff97741b4e250ad5763f3",
+    "project/.pi/settings.json": "608aa314a915a7ce8cf2c2c7d82bde956b1c1a4973c736662516e5a642eec673",
+    "project/AGENTS.md": "ef1cd7b87dc161a5891148602f6ef35ac6bf072d1d09e6a21e84a86d1efdbbd1",
+    "project/CLAUDE.md": "5a997861471a749cb9b85b7ddf49248cff2e9ee2a23b668948254749dce187d1",
+    "project/content-package/data.txt": "f5ca4bac000f8bfd6aed0bcc28316a2f1de84bde55c4a30cbf00563b3fa7f3c5",
+    "project/opencode.json": "70cadc8acdced125361a637eac5816a7f3d77912020c00d5a63f34b106292858",
+    "project/unrelated.txt": "b7f8dbf549bd89e58224a569cf214cf35785cdf0aac2d74afe91d3b14dced4ef",
+    "home/.claude/CLAUDE.md": "70af5c88fe3684bdb5d9f8e1000db0728384d5b908c18e83f4371bfb5b866cca",
+    "home/.claude/settings.json": "7cca3ebb0ef0ac689c686fa5eb5ee78ee537dcfe10d292c405709056c91e6f39",
+    "home/.claude/skills/invented-preservation/SKILL.md": "c839075c77873a64fce834e77e2dc673d61ec60fb201cda18f9af21c504b7866",
+    "home/.codex/AGENTS.md": "e604d8f902a3d26d3acd58b7745c78498fb04a661b2164cd8aad049889c42b44",
+    "home/.codex/config.toml": "c6c42ec261e9160f597b86249deb56e55716dfe26f6f6d6cfbfeaaf4ddef1569",
+    "home/.config/opencode/AGENTS.md": "6ded504a5b47629b45c696d0ded93484342ec73a359aff8f0899a8a297943a22",
+    "home/.config/opencode/opencode.json": "70cadc8acdced125361a637eac5816a7f3d77912020c00d5a63f34b106292858",
+    "home/.patronus/state.json": "bd9f6c5b68e43c8e7bdf493d74262d732c9f8c1109369cb877a8b34f47d51325",
+    "home/.pi/agent/AGENTS.md": "c17682dfd9e8aaa3c37899068c5c85cace6c1c001e71b52bb376753300df3515",
+    "home/.pi/agent/settings.json": "608aa314a915a7ce8cf2c2c7d82bde956b1c1a4973c736662516e5a642eec673",
+    "home/content-package/data.txt": "04bda7132e6887ff8576d320edf09edba92ab8851294313c815df5b791e183ad",
+    "home/unrelated.txt": "e0c2ab3a59f1611faf684c380992bc22c2089ae498994cee10d5cdb074597aa3"
+  }
+}

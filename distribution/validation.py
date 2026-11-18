@@ -40,23 +40,37 @@ def asset_url(configuration, identity, asset):
             f"{identity['tag']}/{asset}")
 
 
-def render(channel, registration, snapshot):
-    """Return deterministic native path/byte pairs; never write or execute assets."""
+def render(channel, registration, snapshot, bottles=None):
+    """Return deterministic native path/byte pairs; never write or execute assets.
+
+    Only Brew accepts a checked bottle_set; without one it renders the unbottled
+    build input that native bottle builds consume and that is never published.
+    """
     require(channel in {'brew', 'scoop', 'winget'}, 'unsupported channel')
     if channel == 'brew':
         from .brew import render as renderer
-    elif channel == 'scoop':
+        return renderer(registration, snapshot, bottles)
+    require(bottles is None, 'bottles apply to the Brew channel only')
+    if channel == 'scoop':
         from .scoop import render as renderer
     else:
         from .winget import render as renderer
     return renderer(registration, snapshot)
 
 
-def validate_candidate(channel, registration, snapshot, candidate):
-    """Return byte-bound pass/fail evidence from actual parsers/schemas/native tools."""
+def validate_candidate(channel, registration, snapshot, candidate, bottles=None):
+    """Return byte-bound pass/fail evidence from actual parsers/schemas/native tools.
+
+    With a bottle_set the Brew formula must carry exactly that set's bottle block.
+    """
     result = empty_result(channel)
     try:
         c, identity = bind_inputs(result, registration, snapshot)
+        if bottles is not None:
+            from .bottles import check_bottle_set
+            require(channel == 'brew', 'bottles apply to the Brew channel only')
+            bottles = check_bottle_set(registration, snapshot, bottles)
+            result['bottle_set_sha256'] = canonical_digest(bottles)
         require(type(candidate) is dict and candidate and
                 all(type(path) is str and type(data) is bytes for path, data in candidate.items()),
                 'candidate must map paths to bytes')
@@ -70,7 +84,7 @@ def validate_candidate(channel, registration, snapshot, candidate):
         schemas, registry, evidence = validation_environment()
         result['validation'] = evidence
         if channel == 'brew':
-            require(candidate == render('brew', registration, snapshot),
+            require(candidate == render('brew', registration, snapshot, bottles),
                     'formula bytes differ from approved deterministic definition')
             native_brew(candidate, result['validation'])
         elif channel == 'scoop':
@@ -98,7 +112,7 @@ def validate_candidate(channel, registration, snapshot, candidate):
 def empty_result(channel):
     return dict(schema_version=1, channel=channel, passed=False, state='failed',
                 errors=[], failure_code='validation-failed', validation={}, authority='not-evaluated',
-                candidate_files={}, candidate_digest=None,
+                candidate_files={}, candidate_digest=None, bottle_set_sha256=None,
                 snapshot_digest=None, configuration_digest=None)
 
 
@@ -293,16 +307,16 @@ def check_winget(c, identity, documents):
                 'WinGet frozen URL/hash mismatch: ' + native)
 
 
-def read_regular(path):
+def read_regular(path, limit=1024 * 1024):
     """Bounded local input read; reject symlinks and special files before reading."""
     require(not path.is_symlink(), 'symlink input is forbidden: ' + str(path))
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
         require(stat.S_ISREG(info.st_mode), 'input must be a regular file')
-        require(0 < info.st_size <= 1024 * 1024, 'input size bound exceeded')
-        data = stream.read(1024 * 1024 + 1)
-        require(0 < len(data) <= 1024 * 1024, 'input size bound exceeded')
+        require(0 < info.st_size <= limit, 'input size bound exceeded')
+        data = stream.read(limit + 1)
+        require(0 < len(data) <= limit, 'input size bound exceeded')
         return data
 
 

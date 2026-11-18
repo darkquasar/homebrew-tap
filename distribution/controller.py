@@ -1,12 +1,14 @@
 """Admitted release distribution and channel publication."""
+import hashlib
 import io
 import zipfile
 
-from .contracts import CONTROL_REPOSITORY, OWNER_ID, RECORDS_BRANCH, VERSION, canonical_digest, fields, matches, require, validate_configuration, validate_registration
+from .contracts import CONTROL_REPOSITORY, DIGEST, OWNER_ID, RECORDS_BRANCH, VERSION, canonical_digest, fields, matches, require, validate_configuration, validate_registration
 from .snapshot import approve_snapshot, inspect_identity, load_authorized_snapshot, strict_json, validate_snapshot
 from .state import encode, file_digest, regular, result, save_status, version_key
 from .validation import expected_paths, render, validate_candidate
 from .trust import authorize_controller, verify_release
+from . import bottles as bottle_rules
 
 
 class IdentityConflict(ValueError):
@@ -50,6 +52,7 @@ def status(registration,version,github,credentials):
             state = 'published' if marker['version'] == version else 'skipped'
             outcome.update(state=state,marker_observation=binding,definition_digest=marker['definition_digest'],
                 destination_commit=tip,message='Actual current definition observed at '+marker['version'])
+            outcome.update({k: marker[k] for k in ['release_tag','bottle_set_sha256','bottles'] if k in marker})
         except Exception as error:
             outcome.update(state='unknown',failure_code='observation-unavailable',message=str(error))
         outcomes[channel] = outcome
@@ -185,29 +188,54 @@ def observe_winget(registration, version, github, source):
                     last_observation=prior,message=str(error),failure_code='observation-unavailable')
 
 
-def publish(registration, record_ref, github, credentials, channels=None):
+def publish(registration, record_ref, github, credentials, channels=None, *, evidence=None, archives=None):
+    """Publish/prepare admitted channels that passed native checks (PD-17).
+
+    `evidence` is the parsed native-checks.json of this run (None when absent) and
+    `archives` maps remote bottle filenames to bytes from the bottle build/select
+    jobs. Both are untrusted inputs: every binding is re-derived here.
+    """
     admission = admit(registration, github, 'publish')
     snapshot = load_authorized_snapshot(registration, record_ref, github)
     channels = ['brew','scoop','winget'] if channels is None else channels
     require(channels and len(set(channels)) == len(channels)
             and set(channels) <= {'brew','scoop','winget'}, 'invalid requested channels')
+    context = github.controller_context()
+    native_reference = None
+    if type(evidence) is dict and type(evidence.get('run')) is dict:
+        native_reference = dict(run=evidence['run'], digest=canonical_digest(evidence))
     # Native tools/dependencies bootstrap before minting any publishing credential.
     candidates = {}
+    selected_bottles = {}
     outcomes = {}
     for channel in channels:
+        bottles = None
         try:
-            candidate = render(channel, registration, snapshot)
-            evidence = validate_candidate(channel, registration, snapshot, candidate)
+            if channel == 'brew':
+                bottles = evidence_bottle_set(registration, snapshot, evidence)
+            candidate = render(channel, registration, snapshot, bottles)
+            binding = (hashlib.sha256(candidate[registration['configuration']['destinations']['brew']['path']]).hexdigest()
+                       if channel == 'brew' else file_digest(candidate))
+            failing = bottle_rules.native_failures(channel, registration, snapshot, evidence, binding,
+                                                   context, bottles)
+            if failing:
+                outcomes[channel] = native_failed(channel, registration, snapshot, failing, native_reference)
+                continue
+            evidence_result = validate_candidate(channel, registration, snapshot, candidate, bottles)
+        except NativeEvidenceUnavailable as error:
+            outcomes[channel] = native_failed(channel, registration, snapshot, [str(error)], native_reference)
+            continue
         except Exception as error:
             outcomes[channel] = result(channel,registration,snapshot,state='failed',
                 failure_code='validation-unavailable' if isinstance(error,(ImportError,FileNotFoundError)) else 'validation-failed',
                 message=str(error))
             continue
-        if evidence['passed']:
+        if evidence_result['passed']:
             candidates[channel] = candidate
+            selected_bottles[channel] = bottles
         else:
             outcomes[channel] = result(channel, registration, snapshot, state='failed',
-                validation=evidence, failure_code=evidence['failure_code'], message='; '.join(evidence['errors']))
+                validation=evidence_result, failure_code=evidence_result['failure_code'], message='; '.join(evidence_result['errors']))
     storage_errors = []
     try:
         credentials.acquire('publish',admission,repository=CONTROL_REPOSITORY)
@@ -219,7 +247,16 @@ def publish(registration, record_ref, github, credentials, channels=None):
         if channel in candidates:
             try:
                 credentials.acquire('publish',admission,repository=registration['configuration']['destinations'][channel]['repository'])
-                outcomes[channel] = apply_channel(channel, registration, snapshot, candidates[channel], github)
+                if channel == 'brew':
+                    released = apply_bottles(registration, snapshot, selected_bottles['brew'], archives or {},
+                                             evidence, github)
+                    if 'state' in released:
+                        outcomes[channel] = released
+                    else:
+                        outcomes[channel] = apply_channel(channel, registration, snapshot, candidates[channel],
+                                                          github, bottles=released)
+                else:
+                    outcomes[channel] = apply_channel(channel, registration, snapshot, candidates[channel], github)
             except Exception as error:
                 from .github import RefOutcomeUnknown
                 outcomes[channel] = result(channel, registration, snapshot,
@@ -229,6 +266,8 @@ def publish(registration, record_ref, github, credentials, channels=None):
                     failure_code=('write-outcome-unknown' if isinstance(error,RefOutcomeUnknown) else
                         'identity-conflict' if isinstance(error,IdentityConflict) else 'destination-unavailable'),message=str(error))
         outcomes[channel]['admission'] = admission
+        if native_reference:
+            outcomes[channel]['native_checks'] = native_reference
         try:
             save_status(registration, snapshot, {channel: outcomes[channel]}, github)
         except Exception as error:
@@ -236,6 +275,146 @@ def publish(registration, record_ref, github, credentials, channels=None):
     return dict(state='partial-failure' if storage_errors or any(v['state'] in
         {'failed','unknown','rejected'} for v in outcomes.values()) else 'complete',
         admission=admission, channels=outcomes, refreshed=refreshed,storage_errors=storage_errors)
+
+
+class NativeEvidenceUnavailable(ValueError):
+    """The run's native evidence cannot supply a checked bottle_set."""
+
+
+def evidence_bottle_set(registration, snapshot, evidence):
+    """The bottle_set the native checks covered; the only set Brew may publish."""
+    try:
+        document = bottle_rules.validate_native_checks(evidence)
+    except bottle_rules.NativeEvidenceInvalid as error:
+        raise NativeEvidenceUnavailable('native-checks.json ' + ('missing' if evidence is None else
+                                        'invalid: ' + str(error))) from None
+    if document['brew'] is None:
+        raise NativeEvidenceUnavailable('brew evidence missing')
+    try:
+        return bottle_rules.check_bottle_set(registration, snapshot, document['brew']['bottle_set'])
+    except bottle_rules.BottleInvalid as error:
+        raise NativeEvidenceUnavailable('brew evidence bottle_set invalid: ' + str(error)) from None
+
+
+def native_failed(channel, registration, snapshot, failing, reference=None):
+    outcome = result(channel, registration, snapshot, state='failed', failure_code='native-check-failed',
+                     failing_platforms=list(failing),
+                     message='Native package checks did not pass: ' + '; '.join(failing))
+    if reference:
+        outcome['native_checks'] = reference
+    return outcome
+
+
+def bottle_failed(registration, snapshot, code, message, **changes):
+    return result('brew', registration, snapshot, state='failed', failure_code=code, message=message, **changes)
+
+
+def apply_bottles(registration, snapshot, bottles, archives, evidence, github):
+    """Make the checked bottle_set durable on the tap release (plan T6 steps 3 to 7).
+
+    Returns the published bottle_set, or a failed Brew channel result. Nothing is
+    written before every check passes; only this run's own draft is ever changed.
+    """
+    try:
+        registration = validate_registration(registration)
+        validate_snapshot(registration, snapshot)
+        c = registration['configuration']
+        identity = snapshot['payload']['identity']
+        version = identity['version']
+        try:
+            bottles = bottle_rules.check_bottle_set(registration, snapshot, bottles)
+        except bottle_rules.BottleInvalid as error:
+            return bottle_failed(registration, snapshot, 'bottle-invalid', str(error))
+        formula = render('brew', registration, snapshot, bottles)[c['destinations']['brew']['path']]
+        failing = bottle_rules.native_failures('brew', registration, snapshot, evidence,
+            hashlib.sha256(formula).hexdigest(), github.controller_context(), bottles)
+        if failing:
+            return native_failed('brew', registration, snapshot, failing)
+        # Step 3: artifacts from unprivileged jobs are untrusted; re-verify every archive.
+        if type(archives) is not dict:
+            return native_failed('brew', registration, snapshot, ['bottle archives missing'])
+        upload = {}
+        for tag, digest in bottles['tags'].items():
+            name = bottle_rules.remote_filename(c['identifiers']['brew'], version, tag)
+            platform = '-'.join(bottle_rules.bottle_tag_platform(tag))
+            data = archives.get(name)
+            if type(data) is not bytes or hashlib.sha256(data).hexdigest() != digest:
+                return native_failed('brew', registration, snapshot,
+                                     [f'{platform}: archive {name} missing or differs from the checked bottle'])
+            try:
+                bottle_rules.verify_bottle(data, registration, snapshot, tag)
+            except bottle_rules.BottleConflict as error:
+                return bottle_failed(registration, snapshot, 'bottle-conflict', str(error), failing_platforms=[platform])
+            except bottle_rules.BottleInvalid as error:
+                return bottle_failed(registration, snapshot, 'bottle-invalid', str(error), failing_platforms=[platform])
+            upload[name] = data
+        source = evidence['brew']['source']
+        # Steps 1/4: a published release is selected as is, never rebuilt or replaced.
+        try:
+            published = bottle_rules.select_bottles(registration, snapshot, github)
+        except bottle_rules.BottleConflict as error:
+            return bottle_failed(registration, snapshot, 'bottle-conflict', str(error))
+        if published is not None:
+            if published['bottle_set'] != bottles:
+                code = 'bottle-race' if source == 'fresh' else 'bottle-conflict'
+                return bottle_failed(registration, snapshot, code,
+                    f"tap release {bottles['release_tag']} already publishes a different bottle set; "
+                    'retry selects and checks the published set')
+            return published['bottle_set']
+        if source != 'fresh':
+            return bottle_failed(registration, snapshot, 'bottle-conflict',
+                f"checked published release {bottles['release_tag']} is no longer visible")
+        # Steps 5/6: a draft owned by this run, read back, then published under the tag.
+        context = github.controller_context()
+        body = (f"Homebrew bottles for {c['app']} {version}.\n\nrun_id: {context['run_id']}\n"
+                f"run_attempt: {context['attempt']}\nbottle_set_sha256: {canonical_digest(bottles)}\n")
+        repository = c['destinations']['brew']['repository']
+        target = github.branch_tip(repository, github.default_branch(repository))
+        require(target is not None, 'tap default branch unavailable')
+        from .github import ReleaseTagTaken
+        try:
+            draft = github.create_bottle_draft(registration, version, body, target)['id']
+        except ReleaseTagTaken as error:
+            return bottle_failed(registration, snapshot, 'bottle-race',
+                f'{error}; no formula written, retry selects and checks the published set')
+        try:
+            for tag in bottle_rules.ordered_tags(bottles['tags']):
+                name = bottle_rules.remote_filename(c['identifiers']['brew'], version, tag)
+                github.upload_bottle(registration, version, draft, name, upload[name])
+            require(github.draft_assets(registration, version, draft) == upload, 'draft asset read-back mismatch')
+            github.publish_bottle_draft(registration, version, draft)
+        except Exception as error:
+            published_own = False
+            if not isinstance(error, ReleaseTagTaken):
+                try:
+                    current = github.published_release(registration, version)
+                    published_own = current is not None and current['id'] == draft
+                except Exception:
+                    published_own = False
+            if not published_own:
+                cleanup = ''
+                try:
+                    github.delete_bottle_draft(registration, version, draft)
+                except Exception as cleanup_error:
+                    cleanup = f'; own draft {draft} retained: {cleanup_error}'
+                if isinstance(error, ReleaseTagTaken):
+                    return bottle_failed(registration, snapshot, 'bottle-race',
+                        f'{error}; no formula written, retry selects and checks the published set{cleanup}')
+                return bottle_failed(registration, snapshot, 'destination-unavailable', str(error) + cleanup)
+        # Step 7: public URL read-back of every asset before any formula write.
+        try:
+            final = bottle_rules.select_bottles(registration, snapshot, github)
+        except bottle_rules.BottleConflict as error:
+            return bottle_failed(registration, snapshot, 'bottle-conflict', 'public read-back: ' + str(error))
+        except Exception as error:
+            return bottle_failed(registration, snapshot, 'destination-unavailable',
+                                 'public read-back unavailable; retry reuses the release: ' + str(error))
+        if final is None or final['bottle_set'] != bottles:
+            return bottle_failed(registration, snapshot, 'bottle-conflict',
+                                 'public read-back differs from the published bottle set')
+        return final['bottle_set']
+    except Exception as error:
+        return bottle_failed(registration, snapshot, 'destination-unavailable', str(error))
 
 
 def authority(registration, request, github, credentials):
@@ -326,18 +505,29 @@ def record_snapshot(registration, snapshot, admission, github):
     raise ValueError('records cas-exhausted; dispatch a fresh retry')
 
 
-def apply_channel(channel, registration, snapshot, candidate, github):
-    """Apply a candidate after protected admission. This function never mints credentials."""
+def apply_channel(channel, registration, snapshot, candidate, github, bottles=None):
+    """Apply a candidate after protected admission. This function never mints credentials.
+
+    Brew applies only a bottled formula whose bottle_set apply_bottles published.
+    """
     registration = validate_registration(registration)
     validate_snapshot(registration, snapshot)
     c = registration['configuration']
     identity = snapshot['payload']['identity']
     outcome = result(channel, registration, snapshot, definition_digest=file_digest(candidate))
-    validation = validate_candidate(channel, registration, snapshot, candidate)
+    if channel == 'brew' and bottles is None:
+        return {**outcome, 'state': 'failed', 'failure_code': 'bottles-required',
+                'message': 'Brew publishes only a bottled formula after its bottles are published'}
+    validation = validate_candidate(channel, registration, snapshot, candidate, bottles)
     outcome['validation'] = validation
     if not validation['passed']:
         return {**outcome, 'state': 'failed', 'failure_code': validation['failure_code'],
                 'message': '; '.join(validation['errors'])}
+    bottle_fields = {}
+    if bottles is not None:
+        bottle_fields = dict(release_tag=bottles['release_tag'], bottle_set_sha256=canonical_digest(bottles),
+                             bottles=dict(bottles['tags']))
+        outcome.update(bottle_fields)
     require(validation['candidate_digest'] == file_digest(candidate), 'candidate changed after validation')
     require(set(candidate) == set(expected_paths(channel, c, identity)), 'unregistered path')
     if channel == 'winget':
@@ -348,7 +538,7 @@ def apply_channel(channel, registration, snapshot, candidate, github):
     marker_path = '.distribution/channels/' + c['app'] + '.json'
     marker = dict(schema_version=1, app=c['app'], version=identity['version'],
                   snapshot_digest=snapshot['snapshot_digest'], definition_digest=file_digest(candidate),
-                  configuration_digest=registration['configuration_digest'])
+                  configuration_digest=registration['configuration_digest'], **bottle_fields)
     for _ in range(5):
         tip = github.branch_tip(repository, branch)
         require(tip is not None, 'destination branch unavailable')
@@ -364,7 +554,7 @@ def apply_channel(channel, registration, snapshot, candidate, github):
                 if previous['snapshot_digest'] != snapshot['snapshot_digest']:
                     raise IdentityConflict('same-version identity conflict')
         existing = {path: regular(tree, path) for path in candidate}
-        check_evidence(channel,registration,snapshot,candidate,validation)
+        check_evidence(channel,registration,snapshot,candidate,validation,bottles)
         if existing == candidate and prior == encode(marker):
             return {**outcome, 'state': 'published', 'destination_commit': tip,
                     'message': 'identical destination reconciled'}
@@ -375,11 +565,12 @@ def apply_channel(channel, registration, snapshot, candidate, github):
             'message': 'five conflicting tips; dispatch a fresh retry'}
 
 
-def check_evidence(channel,registration,snapshot,candidate,evidence):
+def check_evidence(channel,registration,snapshot,candidate,evidence,bottles=None):
     from .validation import validation_environment
     pins = validation_environment()[2]
     require(evidence.get('passed') is True and evidence.get('state') == 'validated'
             and evidence.get('channel') == channel
+            and evidence.get('bottle_set_sha256') == (canonical_digest(bottles) if bottles is not None else None)
             and evidence.get('snapshot_digest') == snapshot['snapshot_digest']
             and evidence.get('configuration_digest') == registration['configuration_digest']
             and evidence.get('candidate_digest') == file_digest(candidate), 'candidate/evidence binding changed')
@@ -388,7 +579,14 @@ def check_evidence(channel,registration,snapshot,candidate,evidence):
 
 
 def verify_marker(channel,registration,snapshot,marker,tree,github):
-    fields(marker,'schema_version app version snapshot_digest definition_digest configuration_digest')
+    names = 'schema_version app version snapshot_digest definition_digest configuration_digest'
+    if channel == 'brew' and type(marker) is dict and 'release_tag' in marker:
+        fields(marker,names+' release_tag bottle_set_sha256 bottles')
+        require(marker['release_tag'] == f"{registration['configuration']['app']}-{marker['version']}"
+                and matches(DIGEST,marker['bottle_set_sha256']) and type(marker['bottles']) is dict
+                and all(matches(DIGEST,v) for v in marker['bottles'].values()), 'invalid bottle marker')
+    else:
+        fields(marker,names)
     c = registration['configuration']
     require(type(marker['schema_version']) is int and marker['schema_version'] == 1
             and marker['app'] == c['app'], 'invalid channel marker')
